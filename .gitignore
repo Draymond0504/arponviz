@@ -17,3 +17,5 @@ results/
 checkpoints/
 wandb/
 runs/
+
+.venv*/

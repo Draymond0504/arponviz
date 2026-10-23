@@ -45,3 +45,27 @@ docker compose up --build
 无需安装任何外部仿真软件（不需要 ROS2/Gazebo/SUMO/AnyLogic）。全部逻辑为纯 Python 自实现的离散时间步模拟循环，`pip install -r requirements.txt` 即可运行整个项目。
 
 后续如强化"具身智能"叙事，可选接入 ROS2 + Nav2 + Gazebo（需 Ubuntu/WSL2 环境）；如需更真实的路网/交通仿真，可选接入 SUMO（`pip install eclipse-sumo`）。两者均不在当前骨架范围内。
+
+
+## 独立维护
+
+本仓库从 `Draymond0504/airport-marl` 拆出，保留初始导入提交供追溯。
+当前工作树仅包含 ApronOps 平台，平台使用自身车辆仿真与规则调度。
+算法和论文研究代码继续维护于 https://github.com/Draymond0504/airport-marl 。
+
+使用 Python 3.11 或 3.12，先创建本地环境：
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pytest tests -q
+```
+
+前端入口为 `apronops/dashboard/app.py`，后端入口为
+`apronops/api/main.py`。默认前端连接 `http://localhost:8000`；
+通过 `APRONOPS_API_BASE` 可指定后端地址。
+`APRONOPS_DB_PATH` 指定 SQLite 数据库位置，数据文件不加入 Git。
+
+修改前端后需同时启动 API 和 Streamlit 核对页面；涉及业务逻辑时运行
+`pytest tests -q`。两套工程尚未通过 API 接入，不依赖 MAPPO 模型权重。
