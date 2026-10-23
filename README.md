@@ -49,6 +49,13 @@ docker compose up --build
 
 ## 独立维护
 
+GitHub 仓库：https://github.com/Draymond0504/arponviz
+
+```bash
+git clone git@github.com:Draymond0504/arponviz.git
+cd arponviz
+```
+
 本仓库从 `Draymond0504/airport-marl` 拆出，保留初始导入提交供追溯。
 当前工作树仅包含 ApronOps 平台，平台使用自身车辆仿真与规则调度。
 算法和论文研究代码继续维护于 https://github.com/Draymond0504/airport-marl 。
