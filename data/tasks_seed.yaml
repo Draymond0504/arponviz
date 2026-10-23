@@ -1,26 +1,25 @@
-# 模拟任务种子数据（占位，替代真实航班触发的保障任务）
 tasks:
-  - id: TASK_001
-    type: baggage_tow
-    origin: STAND_A1
-    destination: CARGO_1
-    priority: 4
-    deadline_offset_s: 900
-  - id: TASK_002
-    type: catering_supply
-    origin: SUPPLY_1
-    destination: STAND_A2
-    priority: 3
-    deadline_offset_s: 1200
-  - id: TASK_003
-    type: inspection
-    origin: MAINT_1
-    destination: STAND_A1
-    priority: 2
-    deadline_offset_s: 1800
-  - id: TASK_004
-    type: baggage_tow
-    origin: STAND_A2
-    destination: CARGO_1
-    priority: 5
-    deadline_offset_s: 600
+- id: TASK_001
+  type: baggage_tow
+  origin: '0'
+  destination: '900'
+  priority: 4
+  deadline_offset_s: 900
+- id: TASK_002
+  type: catering_supply
+  origin: '901'
+  destination: '19'
+  priority: 3
+  deadline_offset_s: 1200
+- id: TASK_003
+  type: inspection
+  origin: '403'
+  destination: '0'
+  priority: 2
+  deadline_offset_s: 1800
+- id: TASK_004
+  type: baggage_tow
+  origin: '19'
+  destination: '900'
+  priority: 5
+  deadline_offset_s: 600

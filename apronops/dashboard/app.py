@@ -67,18 +67,28 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids):
             hoverinfo="skip", showlegend=False,
         ))
 
-    fig.add_trace(go.Scatter(
-        x=[n["x"] for n in nodes], y=[n["y"] for n in nodes],
-        mode="markers+text",
-        marker=dict(symbol="square", size=14, color=NODE_FILL_COLOR, line=dict(color=INK_PRIMARY, width=1)),
-        text=[n["label"] for n in nodes],
-        customdata=[n["type"] for n in nodes],
-        textposition="top center",
-        textfont=dict(color=INK_PRIMARY),
-        hovertemplate="%{text}<br>类型: %{customdata}<extra></extra>",
-        showlegend=False,
-        name="作业点",
-    ))
+    styles = {
+        "stand": ("机位", "square", 11, "#2a78d6"),
+        "stand_front": ("机位连接点", "circle", 4, "#b4bec7"),
+        "taxiway": ("滑行节点", "circle", 5, "#8795a2"),
+        "entry": ("入口", "triangle-up", 12, "#1baf7a"),
+        "exit": ("出口", "triangle-down", 12, "#eb6834"),
+    }
+    for kind, (name, symbol, size, color) in styles.items():
+        group = [n for n in nodes if n["type"] == kind]
+        if not group:
+            continue
+        labelled = kind in ("stand", "entry", "exit")
+        fig.add_trace(go.Scatter(
+            x=[n["x"] for n in group], y=[n["y"] for n in group],
+            mode="markers+text" if labelled else "markers",
+            marker=dict(symbol=symbol, size=size, color=color),
+            text=[n["label"] for n in group],
+            customdata=[n["id"] for n in group],
+            textposition="top center", textfont=dict(size=10, color=INK_PRIMARY),
+            hovertemplate="%{text}<br>节点 ID: %{customdata}<extra></extra>",
+            name=name, showlegend=True,
+        ))
 
     highlight_color = {vid: HIGHLIGHT_COLORS[i] for i, vid in enumerate(highlight_ids[:3])}
 
@@ -172,7 +182,8 @@ if page == "运行总览":
         height=40,
     )
 
-    st.subheader("机坪拓扑与车辆轨迹")
+    st.subheader("Layout H 机坪拓扑与车辆轨迹")
+    st.caption("30 个机位 · 103 个节点 · 119 条双向路段；支持缩放、拖动和悬浮查看。")
     vehicle_ids = sorted(v["id"] for v in vehicles)
     highlight_ids = st.multiselect(
         "高亮车辆轨迹（最多 3 辆，用颜色区分；未选中的车辆靠标签识别身份）",
@@ -186,6 +197,7 @@ if page == "运行总览":
         )
     except requests.RequestException as e:
         st.error(f"无法加载机坪拓扑：{e}")
+        st.stop()
 
     st.subheader("车辆状态表")
     if vehicles:
@@ -203,8 +215,10 @@ if page == "运行总览":
         c1, c2, c3, c4 = st.columns(4)
         task_id = c1.text_input("任务 ID", value=f"TASK_{len(tasks) + 1:03d}")
         task_type = c2.selectbox("类型", ["baggage_tow", "catering_supply", "inspection"])
-        origin = c3.text_input("起点节点 ID", value="STAND_A1")
-        destination = c4.text_input("终点节点 ID", value="CARGO_1")
+        node_options = [n["id"] for n in layout_data["nodes"]]
+        node_labels = {n["id"]: f'{n["label"]}（{n["id"]}）' for n in layout_data["nodes"]}
+        origin = c3.selectbox("起点", node_options, index=node_options.index("0"), format_func=node_labels.get)
+        destination = c4.selectbox("终点", node_options, index=node_options.index("900"), format_func=node_labels.get)
         priority = st.slider("优先级", 1, 5, 3)
         submitted = st.form_submit_button("创建")
         if submitted:
