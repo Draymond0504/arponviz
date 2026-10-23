@@ -5,9 +5,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - apronops-data:/app/data
+      - apronops-data:/app/runtime
     environment:
-      - APRONOPS_DB_PATH=/app/data/apronops.db
+      - APRONOPS_DB_PATH=/app/runtime/apronops.db
 
   dashboard:
     build: .

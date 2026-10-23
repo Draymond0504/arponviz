@@ -1,25 +1,25 @@
 tasks:
 - id: TASK_001
   type: baggage_tow
-  origin: '0'
-  destination: '900'
+  origin: DEPOT_BAG_W
+  destination: SP_01
   priority: 4
-  deadline_offset_s: 900
+  deadline_offset_s: 2400
 - id: TASK_002
   type: catering_supply
-  origin: '901'
-  destination: '19'
+  origin: DEPOT_CATER
+  destination: SP_20
   priority: 3
-  deadline_offset_s: 1200
+  deadline_offset_s: 2400
 - id: TASK_003
   type: inspection
-  origin: '403'
-  destination: '0'
+  origin: DEPOT_AMR
+  destination: CHECK_N
   priority: 2
-  deadline_offset_s: 1800
+  deadline_offset_s: 2400
 - id: TASK_004
   type: baggage_tow
-  origin: '19'
-  destination: '900'
+  origin: DEPOT_BAG_E
+  destination: SP_07
   priority: 5
-  deadline_offset_s: 600
+  deadline_offset_s: 2400

@@ -44,6 +44,7 @@ class World:
         self.tasks = tasks
         self.alerts: dict[str, Alert] = {}
         self.pending_events: list[Event] = []
+        self.crossing_wait: dict[str, float] = {}
         self.now = datetime.utcnow()
         self.home_node: dict[str, str] = {v.id: v.node_id for v in vehicles.values()}
         # 预填一个初始点，避免后台线程第一次 tick 前 /tracks 返回空列表
@@ -167,6 +168,13 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
     layout = world.layout
     remaining_dt = dt
     while remaining_dt > 1e-9:
+        wait = world.crossing_wait.get(vehicle.id, 0.0)
+        if wait > 0:
+            used = min(wait, remaining_dt)
+            world.crossing_wait[vehicle.id] = wait - used
+            remaining_dt -= used
+            vehicle.current_speed_mps = 0.0
+            continue
         if vehicle.node_id == vehicle.target_node_id:
             vehicle.next_node_id = None
             vehicle.edge_progress_m = 0.0
@@ -187,19 +195,22 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
         accel, decel = kinematics.accel_decel_for(vehicle.type)
         remaining_to_next_node = edge_len - vehicle.edge_progress_m
 
-        desired_speed = vehicle.speed_mps
+        desired_speed = min(vehicle.speed_mps, layout.speed_limit(vehicle.node_id, vehicle.next_node_id))
         gap = kinematics.sense_ahead_gap(world, vehicle)
         if gap is not None:
             desired_speed = min(desired_speed, kinematics.safe_following_speed(gap, decel, vehicle.speed_mps))
         turn_cap = kinematics.turn_slowdown_speed(layout, vehicle.planned_path, remaining_to_next_node)
         if turn_cap is not None:
             desired_speed = min(desired_speed, turn_cap)
+        if layout.nodes[vehicle.next_node_id].type == "crossing":
+            # Demo stop at the crossing vertex; no aircraft-clearance signal exists.
+            desired_speed = min(desired_speed, max(0.3, (2 * decel * remaining_to_next_node) ** 0.5))
 
         if desired_speed > vehicle.current_speed_mps:
             new_speed = min(desired_speed, vehicle.current_speed_mps + accel * step)
         else:
             new_speed = max(desired_speed, vehicle.current_speed_mps - decel * step)
-        new_speed = max(0.0, new_speed)
+        new_speed = max(0.0, min(new_speed, layout.speed_limit(vehicle.node_id, vehicle.next_node_id)))
 
         travel = 0.5 * (vehicle.current_speed_mps + new_speed) * step
         travel = min(travel, remaining_to_next_node)
@@ -220,12 +231,15 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
             vehicle.edge_progress_m = 0.0
             if len(vehicle.planned_path) > 1:
                 vehicle.planned_path = vehicle.planned_path[1:]
+            if layout.nodes[vehicle.node_id].type == "crossing":
+                world.crossing_wait[vehicle.id] = layout.metadata.get("crossing_wait_s", 3.0)
+                vehicle.current_speed_mps = 0.0
 
         if new_speed <= 1e-9 and travel <= 1e-9:
             # 被让行/跟车逼停在原地，本次 tick 不再继续推进子步，避免死循环消耗 remaining_dt
             break
 
-    if vehicle.node_id == vehicle.target_node_id:
+    if vehicle.node_id == vehicle.target_node_id and world.crossing_wait.get(vehicle.id, 0.0) <= 0:
         # 到达目标节点这一子步恰好耗尽 remaining_dt 时，循环会在触发顶部重置逻辑前退出，
         # 这里兜底清零速度/路径缓存，避免看板残留最后一段的行驶速度。
         vehicle.next_node_id = None

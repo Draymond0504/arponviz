@@ -26,7 +26,7 @@ def api_post(path: str, json=None, **params):
     return r.json()
 
 
-@st.cache_data
+@st.cache_data(ttl=10)
 def get_layout_cached():
     # 机坪拓扑运行期不变，缓存以省一次往返
     return api_get("/layout")
@@ -42,7 +42,7 @@ VEHICLE_MARKER_COLOR = "#52514e"
 ANOMALOUS_STATES = {"DEGRADED", "PAUSED", "SAFE_STOP", "REMOTE_ASSIST"}
 
 
-def build_topology_figure(layout_data, vehicles, tracks, highlight_ids):
+def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_aircraft=False, route=None):
     """机坪拓扑（作业点+连接边）叠加车辆轨迹与当前位置。
 
     车辆身份靠文字标签区分，不靠颜色——同一坐标系里任意两辆车的轨迹都可能
@@ -54,41 +54,75 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids):
 
     nodes = layout_data["nodes"]
     node_by_id = {n["id"]: n for n in nodes}
+    reference = layout_data.get("reference", {})
+    ref_nodes = {n["id"]: n for n in reference.get("nodes", [])}
+    if show_aircraft:
+        xs, ys = [], []
+        for e in reference.get("edges", []):
+            a, b = ref_nodes[e["from"]], ref_nodes[e["to"]]
+            xs.extend([a["x"], b["x"], None])
+            ys.extend([a["y"], b["y"], None])
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#c6cbd1", width=1, dash="dot"),
+                                 name="飞机网络（仅参照）", hoverinfo="skip"))
+    stands = [n for n in ref_nodes.values() if n["type"] == "stand"]
+    if stands:
+        fig.add_trace(go.Scatter(
+            x=[n["x"] for n in stands], y=[n["y"] for n in stands],
+            mode="markers", marker=dict(symbol="square-open", size=12, color="#8c98a4"),
+            text=[n["label"] for n in stands], hovertemplate="%{text} · 飞机停靠位置<extra></extra>",
+            name="机位位置（Layout H）"))
+    road_styles = {
+        "perimeter": ("外围主路 · 20 km/h", "#485d70", 5),
+        "service": ("分区服务路 · 12 km/h", "#408b91", 3),
+        "stand_access": ("作业支路 · 5 km/h", "#a4bbc1", 2),
+    }
     seen_edges = set()
+    seen_types = set()
     for e in layout_data["edges"]:
         key = frozenset((e["from"], e["to"]))
         if key in seen_edges:
             continue
         seen_edges.add(key)
         a, b = node_by_id[e["from"]], node_by_id[e["to"]]
+        road_type = e.get("road_type", "service")
+        name, color, width = road_styles[road_type]
         fig.add_trace(go.Scatter(
             x=[a["x"], b["x"]], y=[a["y"], b["y"]],
-            mode="lines", line=dict(color=EDGE_COLOR, width=2),
-            hoverinfo="skip", showlegend=False,
+            mode="lines", line=dict(color=color, width=width),
+            text=[name, name], hovertemplate="%{text}<extra></extra>",
+            name=name, legendgroup=road_type, showlegend=road_type not in seen_types,
         ))
+        seen_types.add(road_type)
 
     styles = {
-        "stand": ("机位", "square", 11, "#2a78d6"),
-        "stand_front": ("机位连接点", "circle", 4, "#b4bec7"),
-        "taxiway": ("滑行节点", "circle", 5, "#8795a2"),
-        "entry": ("入口", "triangle-up", 12, "#1baf7a"),
-        "exit": ("出口", "triangle-down", 12, "#eb6834"),
+        "service_point": ("机位服务点", "circle", 7, "#2a78d6"),
+        "road": ("道路连接点", "circle", 3, "#8795a2"),
+        "crossing": ("交叉等待点", "diamond", 10, "#c18423"),
+        "depot": ("车辆基地", "square", 12, "#1b8a64"),
+        "checkpoint": ("巡检点", "triangle-up", 11, "#7a60a8"),
     }
     for kind, (name, symbol, size, color) in styles.items():
         group = [n for n in nodes if n["type"] == kind]
         if not group:
             continue
-        labelled = kind in ("stand", "entry", "exit")
+        labelled = kind in ("service_point", "depot", "checkpoint")
         fig.add_trace(go.Scatter(
             x=[n["x"] for n in group], y=[n["y"] for n in group],
             mode="markers+text" if labelled else "markers",
             marker=dict(symbol=symbol, size=size, color=color),
-            text=[n["label"] for n in group],
-            customdata=[n["id"] for n in group],
+            text=[n["id"].removeprefix("SP_") if kind == "service_point" else n["label"] for n in group],
+            customdata=[[n["id"], n["label"]] for n in group],
             textposition="top center", textfont=dict(size=10, color=INK_PRIMARY),
-            hovertemplate="%{text}<br>节点 ID: %{customdata}<extra></extra>",
+            hovertemplate="%{customdata[1]}<br>节点 ID: %{customdata[0]}<extra></extra>",
             name=name, showlegend=True,
         ))
+
+    if route:
+        points = [node_by_id[nid] for nid in route["path"]]
+        fig.add_trace(go.Scatter(
+            x=[n["x"] for n in points], y=[n["y"] for n in points], mode="lines",
+            line=dict(color="#ad4fad", width=5, dash="dash"), name="预览路线",
+            text=[n["label"] for n in points], hovertemplate="%{text}<extra></extra>"))
 
     highlight_color = {vid: HIGHLIGHT_COLORS[i] for i, vid in enumerate(highlight_ids[:3])}
 
@@ -132,13 +166,14 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids):
         ))
 
     fig.update_layout(
-        height=520,
+        height=700,
         margin=dict(l=20, r=20, t=20, b=40),
         plot_bgcolor="#fcfcfb",
         paper_bgcolor="#fcfcfb",
         xaxis=dict(visible=False),
         yaxis=dict(visible=False, scaleanchor="x", scaleratio=1),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        legend=dict(orientation="h", yanchor="top", y=-0.02),
+        uirevision=layout_data.get("metadata", {}).get("version", "layout"),
     )
     return fig
 
@@ -182,8 +217,8 @@ if page == "运行总览":
         height=40,
     )
 
-    st.subheader("Layout H 机坪拓扑与车辆轨迹")
-    st.caption("30 个机位 · 103 个节点 · 119 条双向路段；支持缩放、拖动和悬浮查看。")
+    st.subheader("机坪车辆专用道路与运行轨迹")
+    st.caption("基于 Layout H 机位布局推演：外围环路 → 分区服务路 → 机位作业支路。蓝点编号对应机位编号。")
     vehicle_ids = sorted(v["id"] for v in vehicles)
     highlight_ids = st.multiselect(
         "高亮车辆轨迹（最多 3 辆，用颜色区分；未选中的车辆靠标签识别身份）",
@@ -191,8 +226,25 @@ if page == "运行总览":
     )
     try:
         layout_data = get_layout_cached()
+        nodes = layout_data["nodes"]
+        crossing_count = sum(n["type"] == "crossing" for n in nodes)
+        segment_count = len({frozenset((e["from"], e["to"])) for e in layout_data["edges"]})
+        st.caption(f"30 个机位服务点 · {len(nodes)} 个车辆节点 · {segment_count} 条双向路段 · {crossing_count} 个交叉等待点。尺寸、限速及停车时长均为仿真设定。")
+        show_aircraft = st.checkbox("叠加飞机滑行道参照", value=False)
+        node_options = [n["id"] for n in nodes if n["type"] in ("service_point", "depot", "checkpoint")]
+        node_labels = {n["id"]: f'{n["label"]}（{n["id"]}）' for n in nodes}
+        route = None
+        with st.expander("查看起终点行车路线"):
+            route_enabled = st.checkbox("在图中显示路线", value=False)
+            c1, c2 = st.columns(2)
+            route_origin = c1.selectbox("路线起点", node_options, index=node_options.index("DEPOT_CATER"), format_func=node_labels.get)
+            route_destination = c2.selectbox("路线终点", node_options, index=node_options.index("SP_20"), format_func=node_labels.get)
+            if route_enabled:
+                route = api_get("/routes", origin=route_origin, destination=route_destination)
+                st.write(f"道路距离 {route['distance_m']:.0f} 米 · 经过 {len(route['crossings'])} 个交叉等待点")
+                st.caption("按距离最短寻路；交叉点停车 3 秒后继续，尚未接入飞机占用和放行信号。")
         st.plotly_chart(
-            build_topology_figure(layout_data, vehicles, tracks, highlight_ids),
+            build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_aircraft, route),
             use_container_width=True,
         )
     except requests.RequestException as e:
@@ -215,10 +267,8 @@ if page == "运行总览":
         c1, c2, c3, c4 = st.columns(4)
         task_id = c1.text_input("任务 ID", value=f"TASK_{len(tasks) + 1:03d}")
         task_type = c2.selectbox("类型", ["baggage_tow", "catering_supply", "inspection"])
-        node_options = [n["id"] for n in layout_data["nodes"]]
-        node_labels = {n["id"]: f'{n["label"]}（{n["id"]}）' for n in layout_data["nodes"]}
-        origin = c3.selectbox("起点", node_options, index=node_options.index("0"), format_func=node_labels.get)
-        destination = c4.selectbox("终点", node_options, index=node_options.index("900"), format_func=node_labels.get)
+        origin = c3.selectbox("起点", node_options, index=node_options.index("DEPOT_BAG_W"), format_func=node_labels.get)
+        destination = c4.selectbox("终点", node_options, index=node_options.index("SP_01"), format_func=node_labels.get)
         priority = st.slider("优先级", 1, 5, 3)
         submitted = st.form_submit_button("创建")
         if submitted:

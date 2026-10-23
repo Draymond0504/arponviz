@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import heapq
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import yaml
 
@@ -20,6 +21,9 @@ class Node:
 class Layout:
     nodes: dict[str, Node] = field(default_factory=dict)
     adjacency: dict[str, list[tuple[str, float, float]]] = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
+    reference: dict = field(default_factory=dict)
+    edge_attributes: dict[tuple[str, str], dict] = field(default_factory=dict)
     # adjacency[node_id] = [(neighbor_id, distance_m, base_travel_s), ...]
 
     def node_xy(self, node_id: str) -> tuple[float, float]:
@@ -67,16 +71,26 @@ class Layout:
                 return w
         raise ValueError(f"no direct edge {a}-{b}")
 
+    def speed_limit(self, a: str, b: str) -> float:
+        return self.edge_attributes.get((a, b), {}).get("speed_limit_mps", float("inf"))
+
 
 def load_layout(path: str) -> Layout:
     with open(path, "r", encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     layout = Layout()
+    layout.metadata = {k: v for k, v in raw.items() if k not in ("nodes", "edges")}
+    if raw.get("reference_file"):
+        with (Path(path).parent / raw["reference_file"]).open(encoding="utf-8") as f:
+            layout.reference = yaml.safe_load(f)
     for n in raw.get("nodes", []):
         layout.nodes[n["id"]] = Node(id=n["id"], label=n["label"], type=n["type"], x=n["x"], y=n["y"])
     for e in raw.get("edges", []):
         a, b, dist, tsec = e["from"], e["to"], float(e["distance_m"]), float(e["base_travel_s"])
         layout.adjacency.setdefault(a, []).append((b, dist, tsec))
         layout.adjacency.setdefault(b, []).append((a, dist, tsec))
+        attrs = {k: v for k, v in e.items() if k not in ("from", "to")}
+        layout.edge_attributes[a, b] = attrs
+        layout.edge_attributes[b, a] = attrs
     return layout

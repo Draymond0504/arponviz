@@ -213,10 +213,27 @@ def list_tracks():
 def get_layout():
     with _lock:
         return {
+            "metadata": _world.layout.metadata,
+            "reference": _world.layout.reference,
             "nodes": [n.__dict__ for n in _world.layout.nodes.values()],
             "edges": [
-                {"from": a, "to": b, "distance_m": d}
+                {"from": a, "to": b, "distance_m": d,
+                 **_world.layout.edge_attributes.get((a, b), {})}
                 for a, neighbors in _world.layout.adjacency.items()
                 for b, d, _ in neighbors
             ],
         }
+
+
+@app.get("/routes")
+def get_route(origin: str, destination: str):
+    with _lock:
+        layout = _world.layout
+        if origin not in layout.nodes or destination not in layout.nodes:
+            raise HTTPException(status_code=400, detail="unknown origin/destination node")
+        try:
+            path = layout.shortest_path(origin, destination)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"path": path, "distance_m": layout.path_distance(origin, destination),
+                "crossings": [n for n in path if layout.nodes[n].type == "crossing"]}

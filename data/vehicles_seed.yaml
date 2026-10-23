@@ -1,26 +1,26 @@
 vehicles:
 - id: TRACTOR_01
   type: tractor
-  home_node: '0'
+  home_node: DEPOT_BAG_W
   speed_mps: 4.0
   battery: 100.0
 - id: TRACTOR_02
   type: tractor
-  home_node: '19'
+  home_node: DEPOT_BAG_E
   speed_mps: 4.0
   battery: 100.0
 - id: SHUTTLE_01
   type: shuttle
-  home_node: '200'
+  home_node: DEPOT_BUS
   speed_mps: 6.0
   battery: 100.0
 - id: CATERING_01
   type: catering
-  home_node: '901'
+  home_node: DEPOT_CATER
   speed_mps: 3.0
   battery: 100.0
 - id: AMR_INSPECT_01
   type: amr_inspect
-  home_node: '403'
+  home_node: DEPOT_AMR
   speed_mps: 1.5
   battery: 100.0
