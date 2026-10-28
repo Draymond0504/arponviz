@@ -72,7 +72,7 @@ pytest tests -q
 前端入口为 `apronops/dashboard/app.py`，后端入口为
 `apronops/api/main.py`。默认前端连接 `http://localhost:8000`；
 通过 `APRONOPS_API_BASE` 可指定后端地址。
-`APRONOPS_DB_PATH` 指定 SQLite 数据库位置，数据文件不加入 Git。
+`APRONOPS_DB_PATH` 指定 SQLite 数据库位置（默认 `apronops-operations-v1.db`），数据文件不加入 Git。
 
 修改前端后需同时启动 API 和 Streamlit 核对页面；涉及业务逻辑时运行
 `pytest tests -q`。两套工程尚未通过 API 接入，不依赖 MAPPO 模型权重。
@@ -85,3 +85,12 @@ pytest tests -q
 车辆道路按 20 / 12 / 5 km/h 分级限速，11 个平面交叉点在仿真中停车 3 秒。停车时长、道路尺寸和服务点偏移均为推演假设，未接入飞机占用或放行信号。看板支持选择起终点预览车辆路线。
 
 配置依据、典型路线与维护步骤见 [车辆道路推演说明](docs/vehicle-roads.md)。生成脚本为 `scripts/build_vehicle_layout.py`，默认车辆图为 `data/apron_layout.yaml`。车辆继续使用平台规则仿真，尚未接入 MAPPO。
+
+
+## 运行与异常处置（第一阶段）
+
+车辆未取货时发生通信故障，任务可重新分配；已经取货或服务中的任务保留，故障全部解除后从原位置和阶段续跑。道路封闭实际影响寻路，无路可走时等待，解除道路告警后恢复通行。
+
+看板地图与状态每 2 秒刷新，支持封路、恢复和事件查看。创建任务、处置告警与每次推进均保存运行快照，API 重启恢复最后成功提交的现场。使用单个 uvicorn worker；已有旧版数据库或不同路网需要使用独立数据库，避免混入旧状态。
+
+操作方式、接口、恢复边界和指标定义见 [运行与异常处置](docs/operations.md)。后续航班任务、飞机穿越约束、批量实验与 MARL 接入按 [分阶段开发路线](docs/development-roadmap.md) 推进。

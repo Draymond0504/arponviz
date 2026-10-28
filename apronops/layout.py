@@ -24,6 +24,7 @@ class Layout:
     metadata: dict = field(default_factory=dict)
     reference: dict = field(default_factory=dict)
     edge_attributes: dict[tuple[str, str], dict] = field(default_factory=dict)
+    blocked_edges: set[tuple[str, str]] = field(default_factory=set)
     # adjacency[node_id] = [(neighbor_id, distance_m, base_travel_s), ...]
 
     def node_xy(self, node_id: str) -> tuple[float, float]:
@@ -31,6 +32,8 @@ class Layout:
         return n.x, n.y
 
     def shortest_path(self, start: str, end: str) -> list[str]:
+        if start not in self.nodes or end not in self.nodes:
+            raise ValueError("unknown origin/destination node")
         if start == end:
             return [start]
         dist = {start: 0.0}
@@ -45,6 +48,8 @@ class Layout:
             if u == end:
                 break
             for v, w, _ in self.adjacency.get(u, []):
+                if self.is_blocked(u, v):
+                    continue
                 nd = d + w
                 if nd < dist.get(v, float("inf")):
                     dist[v] = nd
@@ -73,6 +78,9 @@ class Layout:
 
     def speed_limit(self, a: str, b: str) -> float:
         return self.edge_attributes.get((a, b), {}).get("speed_limit_mps", float("inf"))
+
+    def is_blocked(self, a: str, b: str) -> bool:
+        return tuple(sorted((a, b))) in self.blocked_edges
 
 
 def load_layout(path: str) -> Layout:

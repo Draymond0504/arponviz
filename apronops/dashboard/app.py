@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import os
+import uuid
 
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 
 API_BASE = os.environ.get("APRONOPS_API_BASE", "http://localhost:8000")
 
@@ -86,9 +86,11 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_air
         a, b = node_by_id[e["from"]], node_by_id[e["to"]]
         road_type = e.get("road_type", "service")
         name, color, width = road_styles[road_type]
+        if e.get("closed"):
+            name, color, width, road_type = "封闭路段", "#bf3f3f", 6, "closed"
         fig.add_trace(go.Scatter(
             x=[a["x"], b["x"]], y=[a["y"], b["y"]],
-            mode="lines", line=dict(color=color, width=width),
+            mode="lines", line=dict(color=color, width=width, dash="dash" if e.get("closed") else "solid"),
             text=[name, name], hovertemplate="%{text}<extra></extra>",
             name=name, legendgroup=road_type, showlegend=road_type not in seen_types,
         ))
@@ -178,159 +180,194 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_air
     return fig
 
 
+def error_text(error):
+    response = getattr(error, "response", None)
+    if response is not None:
+        try:
+            return str(response.json().get("detail", error))
+        except ValueError:
+            pass
+    return str(error)
+
+
+def fetch_state():
+    try:
+        state = api_get("/state")
+    except requests.RequestException as error:
+        st.error(f"数据更新失败，当前状态不可用：{error_text(error)}")
+        st.stop()
+    if state["runtime_error"]:
+        st.error(state["runtime_error"])
+    st.caption(f"每 2 秒更新 · 仿真时间 {state['simulation_time']} UTC · 状态版本 {state['revision']}")
+    return state
+
+
+@st.fragment(run_every=2)
+def live_overview(layout_data, highlight_ids, show_aircraft, route_endpoints):
+    state = fetch_state()
+    vehicles, tasks, alerts = state["vehicles"], state["tasks"], state["alerts"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("车辆总数", len(vehicles))
+    c2.metric("执行中任务", sum(t["status"] in ("ASSIGNED", "IN_PROGRESS") for t in tasks))
+    c3.metric("待分配 / 待转派", sum(t["status"] in ("PENDING", "REASSIGNED") for t in tasks))
+    c4.metric("未解决告警", sum(not a["resolved_at"] for a in alerts))
+    closed = {frozenset((c["from_node"], c["to_node"])) for c in state["closures"] if not c["reopened_at"]}
+    current_layout = {**layout_data, "edges": [
+        {**e, "closed": frozenset((e["from"], e["to"])) in closed} for e in layout_data["edges"]]}
+    route = None
+    if route_endpoints:
+        try:
+            route = api_get("/routes", origin=route_endpoints[0], destination=route_endpoints[1])
+            st.caption(f"预览路线：{route['distance_m']:.0f} 米 · {len(route['crossings'])} 个交叉等待点")
+        except requests.HTTPError as error:
+            if error.response.status_code == 409:
+                st.warning("所选起终点暂无可通行路线；道路恢复后自动更新。")
+            else:
+                st.warning(f"路线暂不可用：{error_text(error)}")
+        except requests.RequestException as error:
+            st.warning(f"路线更新失败：{error_text(error)}")
+    st.plotly_chart(build_topology_figure(current_layout, vehicles, state["tracks"], highlight_ids,
+                                        show_aircraft, route), use_container_width=True, key="live_map")
+    st.subheader("车辆状态")
+    if vehicles:
+        df = pd.DataFrame(vehicles)[["id", "type", "state", "task_phase", "current_speed_mps", "battery", "current_task_id", "wait_reason"]]
+        st.dataframe(df.rename(columns={"current_speed_mps": "速度(m/s)", "task_phase": "任务阶段", "wait_reason": "等待原因"}), use_container_width=True)
+    st.subheader("任务列表")
+    if tasks:
+        st.dataframe(pd.DataFrame(tasks)[["id", "type", "status", "priority", "origin", "destination", "assigned_vehicle_id"]], use_container_width=True)
+
+
+@st.fragment(run_every=2)
+def live_alerts():
+    state = fetch_state()
+    st.subheader("告警与处置")
+    if state["alerts"]:
+        st.dataframe(pd.DataFrame(state["alerts"]), use_container_width=True)
+    else:
+        st.info("暂无告警")
+    unresolved = {a["id"]: a for a in state["alerts"] if not a["resolved_at"]}
+    if unresolved:
+        with st.form("resolve_alert"):
+            aid = st.selectbox("选择待处置告警", list(unresolved),
+                               format_func=lambda k: f"{unresolved[k]['anomaly_type']} · {', '.join(unresolved[k]['impact_scope'])}")
+            resolution = st.text_input("处置说明", value="人工确认恢复")
+            if st.form_submit_button("确认恢复并关闭告警"):
+                try:
+                    api_post(f"/alerts/{aid}/resolve", json={"resolution": resolution})
+                    st.success("处置已保存；车辆按任务阶段恢复，道路告警会同步解除封闭。")
+                except requests.RequestException as error:
+                    st.error(error_text(error))
+    st.subheader("封路记录")
+    if state["closures"]:
+        st.dataframe(pd.DataFrame(state["closures"])[["from_node", "to_node", "reason", "closed_at", "reopened_at", "resolution"]], use_container_width=True)
+    else:
+        st.info("暂无道路封闭记录")
+    st.subheader("近期操作与任务事件")
+    try:
+        events = api_get("/events")
+        if events:
+            st.dataframe(pd.DataFrame(events)[["timestamp", "event_type", "source", "related_task_id", "payload"]], use_container_width=True)
+    except requests.RequestException as error:
+        st.warning(f"事件记录暂不可用：{error_text(error)}")
+
+
 page = st.sidebar.radio("导航", ["运行总览", "异常处置", "运营复盘"])
 
 if page == "运行总览":
     st.title("运行总览")
-    try:
-        vehicles = api_get("/vehicles")
-        tasks = api_get("/tasks")
-        alerts = api_get("/alerts")
-        tracks = api_get("/tracks")
-    except requests.RequestException as e:
-        st.error(f"无法连接 API（{API_BASE}）：{e}")
-        st.stop()
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("车辆总数", len(vehicles))
-    col2.metric("活跃任务", sum(1 for t in tasks if t["status"] in ("ASSIGNED", "IN_PROGRESS")))
-    col3.metric("未解决告警", sum(1 for a in alerts if not a.get("resolved_at")))
-
-    ws_url = API_BASE.replace("http://", "ws://").replace("https://", "wss://") + "/ws/state"
-    components.html(
-        f"""
-        <div id="ws-status" style="font-family: sans-serif; font-size: 14px; padding: 4px 0; color: #52514e;">
-          ⚪ 正在连接实时推送…
-        </div>
-        <script>
-          const el = document.getElementById("ws-status");
-          const ws = new WebSocket("{ws_url}");
-          ws.onmessage = (event) => {{
-            const msg = JSON.parse(event.data);
-            const now = new Date().toLocaleTimeString();
-            el.textContent = "\\ud83d\\udfe2 实时连接 · 第 " + msg.tick + " 次推送 · 未解决告警 " + msg.unresolved_alerts + " · 最近更新 " + now;
-          }};
-          ws.onclose = () => {{ el.textContent = "\\ud83d\\udd34 实时连接已断开"; }};
-          ws.onerror = () => {{ el.textContent = "\\ud83d\\udd34 实时连接错误"; }};
-        </script>
-        """,
-        height=40,
-    )
-
     st.subheader("机坪车辆专用道路与运行轨迹")
-    st.caption("基于 Layout H 机位布局推演：外围环路 → 分区服务路 → 机位作业支路。蓝点编号对应机位编号。")
-    vehicle_ids = sorted(v["id"] for v in vehicles)
-    highlight_ids = st.multiselect(
-        "高亮车辆轨迹（最多 3 辆，用颜色区分；未选中的车辆靠标签识别身份）",
-        vehicle_ids, max_selections=3,
-    )
+    st.caption("外围环路 → 分区服务路 → 机位作业支路；蓝点编号对应机位，红色虚线表示封闭道路。")
     try:
         layout_data = get_layout_cached()
-        nodes = layout_data["nodes"]
-        crossing_count = sum(n["type"] == "crossing" for n in nodes)
-        segment_count = len({frozenset((e["from"], e["to"])) for e in layout_data["edges"]})
-        st.caption(f"30 个机位服务点 · {len(nodes)} 个车辆节点 · {segment_count} 条双向路段 · {crossing_count} 个交叉等待点。尺寸、限速及停车时长均为仿真设定。")
-        show_aircraft = st.checkbox("叠加飞机滑行道参照", value=False)
-        node_options = [n["id"] for n in nodes if n["type"] in ("service_point", "depot", "checkpoint")]
-        node_labels = {n["id"]: f'{n["label"]}（{n["id"]}）' for n in nodes}
-        route = None
-        with st.expander("查看起终点行车路线"):
-            route_enabled = st.checkbox("在图中显示路线", value=False)
-            c1, c2 = st.columns(2)
-            route_origin = c1.selectbox("路线起点", node_options, index=node_options.index("DEPOT_CATER"), format_func=node_labels.get)
-            route_destination = c2.selectbox("路线终点", node_options, index=node_options.index("SP_20"), format_func=node_labels.get)
-            if route_enabled:
-                route = api_get("/routes", origin=route_origin, destination=route_destination)
-                st.write(f"道路距离 {route['distance_m']:.0f} 米 · 经过 {len(route['crossings'])} 个交叉等待点")
-                st.caption("按距离最短寻路；交叉点停车 3 秒后继续，尚未接入飞机占用和放行信号。")
-        st.plotly_chart(
-            build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_aircraft, route),
-            use_container_width=True,
-        )
-    except requests.RequestException as e:
-        st.error(f"无法加载机坪拓扑：{e}")
+        initial_state = api_get("/state")
+    except requests.RequestException as error:
+        st.error(f"无法连接平台：{error_text(error)}")
         st.stop()
-
-    st.subheader("车辆状态表")
-    if vehicles:
-        vdf = pd.DataFrame(vehicles)[["id", "type", "state", "x", "y", "current_speed_mps", "battery", "current_task_id"]]
-        vdf = vdf.rename(columns={"current_speed_mps": "实时速度(m/s)"})
-        st.dataframe(vdf, use_container_width=True)
-
-    st.subheader("任务列表")
-    if tasks:
-        tdf = pd.DataFrame(tasks)[["id", "type", "status", "priority", "origin", "destination", "assigned_vehicle_id"]]
-        st.dataframe(tdf, use_container_width=True)
-
+    nodes = layout_data["nodes"]
+    node_options = [n["id"] for n in nodes if n["type"] in ("service_point", "depot", "checkpoint")]
+    node_labels = {n["id"]: f'{n["label"]}（{n["id"]}）' for n in nodes}
+    highlight_ids = st.multiselect("高亮车辆轨迹（最多 3 辆）", sorted(v["id"] for v in initial_state["vehicles"]), max_selections=3)
+    show_aircraft = st.checkbox("叠加飞机滑行道参照", value=False)
+    route_endpoints = None
+    with st.expander("查看起终点行车路线"):
+        enabled = st.checkbox("在图中显示路线", value=False)
+        c1, c2 = st.columns(2)
+        origin = c1.selectbox("路线起点", node_options, index=node_options.index("DEPOT_CATER"), format_func=node_labels.get)
+        destination = c2.selectbox("路线终点", node_options, index=node_options.index("SP_20"), format_func=node_labels.get)
+        if enabled:
+            route_endpoints = (origin, destination)
+        st.caption("路线避开封闭道路；交叉点仍采用停车 3 秒的仿真规则，尚未接入飞机占用信号。")
+    live_overview(layout_data, highlight_ids, show_aircraft, route_endpoints)
+    # Keep the form outside the timed fragment so typing is never interrupted.
     with st.form("create_task"):
-        st.write("手动创建任务")
+        st.subheader("手动创建任务")
+        st.session_state.setdefault("new_task_id", f"TASK_{uuid.uuid4().hex[:8]}")
         c1, c2, c3, c4 = st.columns(4)
-        task_id = c1.text_input("任务 ID", value=f"TASK_{len(tasks) + 1:03d}")
+        task_id = c1.text_input("任务 ID", key="new_task_id")
         task_type = c2.selectbox("类型", ["baggage_tow", "catering_supply", "inspection"])
         origin = c3.selectbox("起点", node_options, index=node_options.index("DEPOT_BAG_W"), format_func=node_labels.get)
         destination = c4.selectbox("终点", node_options, index=node_options.index("SP_01"), format_func=node_labels.get)
         priority = st.slider("优先级", 1, 5, 3)
-        submitted = st.form_submit_button("创建")
-        if submitted:
+        deadline = st.number_input("要求完成时间（从现在起，分钟）", min_value=1, max_value=1440, value=40)
+        if st.form_submit_button("创建"):
             try:
-                api_post("/tasks", json={
-                    "id": task_id, "type": task_type, "origin": origin,
-                    "destination": destination, "priority": priority,
-                })
-                st.success(f"任务 {task_id} 已创建")
-            except requests.RequestException as e:
-                st.error(f"创建失败：{e}")
+                api_post("/tasks", json={"id": task_id, "type": task_type, "origin": origin,
+                                         "destination": destination, "priority": priority, "deadline_offset_s": deadline * 60})
+                st.success(f"任务 {task_id} 已保存，等待调度。创建下一条任务时请使用新的任务 ID。")
+            except requests.RequestException as error:
+                st.error(f"创建失败：{error_text(error)}")
 
 elif page == "异常处置":
     st.title("异常处置")
+    st.caption("未取货任务可自动转派；已取货或服务中的任务保留在原车，故障解除后续跑。")
     try:
-        alerts = api_get("/alerts")
         vehicles = api_get("/vehicles")
-    except requests.RequestException as e:
-        st.error(f"无法连接 API（{API_BASE}）：{e}")
+        layout_data = get_layout_cached()
+    except requests.RequestException as error:
+        st.error(error_text(error))
         st.stop()
-
-    st.subheader("手动注入异常（演示用）")
-    c1, c2, c3 = st.columns(3)
-    vehicle_id = c1.selectbox("车辆", [v["id"] for v in vehicles])
-    anomaly_type = c2.selectbox("异常类型", ["communication_lost", "position_quality_degraded", "route_blocked"])
-    if c3.button("注入"):
-        try:
-            api_post("/anomalies/inject", anomaly_type=anomaly_type, vehicle_id=vehicle_id)
-            st.success("已注入，等待下一次模拟推进后生效")
-        except requests.RequestException as e:
-            st.error(f"注入失败：{e}")
-
-    st.subheader("告警列表")
-    if alerts:
-        adf = pd.DataFrame(alerts)
-        st.dataframe(adf, use_container_width=True)
-        unresolved = [a for a in alerts if not a.get("resolved_at")]
-        if unresolved:
-            alert_id = st.selectbox("选择要处置的告警", [a["id"] for a in unresolved])
-            resolution = st.text_input("处置说明", value="人工确认恢复")
-            if st.button("标记已处置"):
-                try:
-                    api_post(f"/alerts/{alert_id}/resolve", json={"resolution": resolution})
-                    st.success("已处置")
-                except requests.RequestException as e:
-                    st.error(f"处置失败：{e}")
-    else:
-        st.info("暂无告警")
+    with st.form("inject_anomaly"):
+        st.subheader("车辆异常演示")
+        c1, c2 = st.columns(2)
+        vehicle_id = c1.selectbox("车辆", [v["id"] for v in vehicles])
+        labels = {"communication_lost": "通信中断", "position_quality_degraded": "定位质量下降"}
+        kind = c2.selectbox("异常类型", list(labels), format_func=labels.get)
+        if st.form_submit_button("注入车辆异常"):
+            try:
+                api_post("/anomalies/inject", anomaly_type=kind, vehicle_id=vehicle_id)
+                st.success("异常已生效并保存。")
+            except requests.RequestException as error:
+                st.error(error_text(error))
+    with st.form("close_road"):
+        st.subheader("道路封闭")
+        node_labels = {n["id"]: n["label"] for n in layout_data["nodes"]}
+        segments = sorted({tuple(sorted((e["from"], e["to"]))) for e in layout_data["edges"]})
+        edge = st.selectbox("封闭路段（双向）", segments,
+                            format_func=lambda e: f"{node_labels[e[0]]} {e[0]} ↔ {node_labels[e[1]]} {e[1]}")
+        reason = st.text_input("封闭原因", value="临时施工")
+        st.caption("新路线避开该路段；已驶入的车辆原地等待，解除对应告警后恢复通行。")
+        if st.form_submit_button("封闭道路"):
+            try:
+                api_post("/roads/closures", json={"from_node": edge[0], "to_node": edge[1], "reason": reason})
+                st.success("道路已封闭并保存。可在下方对应道路告警中解除封闭。")
+            except requests.RequestException as error:
+                st.error(error_text(error))
+    live_alerts()
 
 else:
     st.title("运营复盘")
-    try:
-        m = api_get("/metrics")
-    except requests.RequestException as e:
-        st.error(f"无法连接 API（{API_BASE}）：{e}")
-        st.stop()
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("任务完成率", f"{m['completion_rate'] * 100:.1f}%")
-    c2.metric("准点率", f"{m['on_time_rate'] * 100:.1f}%")
-    c3.metric("人工介入率", f"{m['manual_intervention_rate'] * 100:.1f}%")
-    c4.metric("平均完成时长(s)", f"{m['avg_completion_time_s']:.0f}")
-
-    st.subheader("原始指标")
-    st.json(m)
+    @st.fragment(run_every=2)
+    def live_metrics():
+        try:
+            m = api_get("/metrics")
+        except requests.RequestException as error:
+            st.error(error_text(error))
+            return
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("任务完成率", f"{m['completion_rate'] * 100:.1f}%")
+        c2.metric("到期任务准时率", f"{m['on_time_rate'] * 100:.1f}%" if m['due_task_total'] else "暂无到期任务")
+        c3.metric("告警解决率", f"{m['alert_resolution_rate'] * 100:.1f}%")
+        c4.metric("逾期未完成", m['overdue_unfinished'])
+        st.caption("准时率分母为仿真时间内已到截止时间的全部任务，包括未完成任务；告警解决率不代表人工干预率。")
+        st.json(m)
+    live_metrics()

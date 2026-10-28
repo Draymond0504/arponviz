@@ -7,7 +7,7 @@ services:
     volumes:
       - apronops-data:/app/runtime
     environment:
-      - APRONOPS_DB_PATH=/app/runtime/apronops.db
+      - APRONOPS_DB_PATH=/app/runtime/apronops-operations-v1.db
 
   dashboard:
     build: .

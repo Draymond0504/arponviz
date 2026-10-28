@@ -70,13 +70,22 @@ class AlertORM(Base):
     resolved_at = Column(DateTime, nullable=True)
 
 
+class RuntimeSnapshotORM(Base):
+    """One atomic checkpoint, committed with projections and operation events."""
+    __tablename__ = "runtime_snapshot"
+    id = Column(Integer, primary_key=True)
+    payload = Column(JSON, nullable=False)
+
+
 _engine = None
 _SessionLocal: sessionmaker | None = None
 
 
 def init_db(db_path: str | None = None) -> None:
     global _engine, _SessionLocal
-    db_path = db_path or os.environ.get("APRONOPS_DB_PATH", "apronops.db")
+    db_path = db_path or os.environ.get("APRONOPS_DB_PATH", "apronops-operations-v1.db")
+    if _engine is not None:
+        _engine.dispose()
     _engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(_engine)
     _SessionLocal = sessionmaker(bind=_engine)

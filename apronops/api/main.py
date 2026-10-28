@@ -3,19 +3,29 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
-import uuid
+import copy
+import logging
+from contextlib import asynccontextmanager, contextmanager
 from datetime import timedelta
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 from .. import metrics, simulator
-from ..models import Task, TaskStatus, TaskType
-from ..state_machine import transition_task
+from ..models import Task, TaskType
+from ..checkpoint import load_or_create_world
 from ..storage import init_db
-from .schemas import CreateTaskRequest, ResolveAlertRequest
+from .schemas import CloseRoadRequest, CreateTaskRequest, ResolveAlertRequest
 
-app = FastAPI(title="ApronOps API")
+@asynccontextmanager
+async def lifespan(app):
+    on_startup()
+    try:
+        yield
+    finally:
+        on_shutdown()
+
+
+app = FastAPI(title="ApronOps API", lifespan=lifespan)
 
 _lock = threading.Lock()
 _world: simulator.World | None = None
@@ -49,6 +59,8 @@ class ConnectionManager:
 _manager = ConnectionManager()
 _loop: asyncio.AbstractEventLoop | None = None
 _tick_seq = 0
+_thread: threading.Thread | None = None
+_runtime_error: str | None = None
 
 
 def _snapshot_payload(world: simulator.World) -> dict:
@@ -71,30 +83,58 @@ def _snapshot_payload(world: simulator.World) -> dict:
     }
 
 
+@contextmanager
+def _mutation():
+    """Persist before acknowledging a command; roll back memory on failure."""
+    global _world
+    with _lock:
+        if _runtime_error:
+            raise HTTPException(status_code=503, detail="运行已暂停，请检查服务日志并重启")
+        previous = copy.deepcopy(_world)
+        try:
+            yield _world
+            _world.revision += 1
+            simulator._persist(_world)
+        except Exception:
+            _world = previous
+            raise
+
+
 def _background_loop() -> None:
-    while not _stop_event.is_set():
-        time.sleep(TICK_INTERVAL_S)
+    global _world, _runtime_error
+    while not _stop_event.wait(TICK_INTERVAL_S):
         with _lock:
-            if _world is not None:
-                simulator.tick(_world, dt=SIM_DT_S, random_anomaly_prob=0.01)
+            previous = copy.deepcopy(_world)
+            try:
+                simulator.tick(_world, dt=SIM_DT_S, random_anomaly_prob=0.0)
                 payload = _snapshot_payload(_world)
+            except Exception:
+                _world = previous
+                _runtime_error = "运行推进失败，已暂停；请检查服务日志"
+                logging.exception("Simulation paused after tick failure")
+                return
         if _loop is not None:
             asyncio.run_coroutine_threadsafe(_manager.broadcast(payload), _loop)
 
 
-@app.on_event("startup")
 def on_startup() -> None:
-    global _world, _loop
+    global _world, _loop, _thread, _runtime_error
     init_db()
-    _world = simulator.load_world()
+    _world = load_or_create_world()
     _loop = asyncio.get_running_loop()
-    thread = threading.Thread(target=_background_loop, daemon=True)
-    thread.start()
+    _runtime_error = None
+    _stop_event.clear()
+    _thread = threading.Thread(target=_background_loop, daemon=True)
+    _thread.start()
 
 
-@app.on_event("shutdown")
 def on_shutdown() -> None:
+    global _thread, _loop
     _stop_event.set()
+    if _thread is not None:
+        _thread.join()
+        _thread = None
+    _loop = None
 
 
 @app.websocket("/ws/state")
@@ -121,7 +161,7 @@ def list_tasks():
 
 @app.post("/tasks")
 def create_task(req: CreateTaskRequest):
-    with _lock:
+    with _mutation():
         if req.id in _world.tasks:
             raise HTTPException(status_code=409, detail="task id already exists")
         try:
@@ -140,6 +180,7 @@ def create_task(req: CreateTaskRequest):
             created_at=_world.now,
         )
         _world.tasks[task.id] = task
+        simulator.record_event(_world, "task_created", "operator", task.id)
         return task.model_dump()
 
 
@@ -151,7 +192,7 @@ def list_alerts():
 
 @app.post("/alerts/{alert_id}/resolve")
 def resolve_alert(alert_id: str, req: ResolveAlertRequest):
-    with _lock:
+    with _mutation():
         if alert_id not in _world.alerts:
             raise HTTPException(status_code=404, detail="alert not found")
         alert = simulator.resolve_alert(_world, alert_id, req.resolution)
@@ -160,7 +201,7 @@ def resolve_alert(alert_id: str, req: ResolveAlertRequest):
 
 @app.post("/anomalies/inject")
 def inject_anomaly(anomaly_type: str, vehicle_id: str):
-    with _lock:
+    with _mutation():
         if vehicle_id not in _world.vehicles:
             raise HTTPException(status_code=404, detail="vehicle not found")
         try:
@@ -197,7 +238,8 @@ def list_events(task_id: str | None = None):
 
 @app.get("/metrics")
 def get_metrics():
-    return metrics.compute_metrics()
+    with _lock:
+        return metrics.compute_metrics(now=_world.now)
 
 
 @app.get("/tracks")
@@ -218,7 +260,8 @@ def get_layout():
             "nodes": [n.__dict__ for n in _world.layout.nodes.values()],
             "edges": [
                 {"from": a, "to": b, "distance_m": d,
-                 **_world.layout.edge_attributes.get((a, b), {})}
+                 **_world.layout.edge_attributes.get((a, b), {}),
+                 "closed": _world.layout.is_blocked(a, b)}
                 for a, neighbors in _world.layout.adjacency.items()
                 for b, d, _ in neighbors
             ],
@@ -234,6 +277,54 @@ def get_route(origin: str, destination: str):
         try:
             path = layout.shortest_path(origin, destination)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=409, detail="当前道路封闭，无可通行路线")
         return {"path": path, "distance_m": layout.path_distance(origin, destination),
                 "crossings": [n for n in path if layout.nodes[n].type == "crossing"]}
+
+
+@app.get("/state")
+def get_state():
+    """One consistent snapshot for map, tables and closure state."""
+    with _lock:
+        return {
+            "revision": _world.revision, "simulation_time": _world.now.isoformat(),
+            "runtime_error": _runtime_error,
+            "vehicles": [{**v.model_dump(), "wait_reason": _world.route_wait.get(v.id, "")}
+                         for v in _world.vehicles.values()],
+            "tasks": [t.model_dump() for t in _world.tasks.values()],
+            "alerts": [a.model_dump() for a in _world.alerts.values()],
+            "closures": list(_world.closures.values()),
+            "tracks": {vid: [{"t": t.isoformat(), "x": x, "y": y} for t, x, y in points]
+                       for vid, points in _world.tracks.items()},
+        }
+
+
+@app.get("/roads/closures")
+def list_closures():
+    with _lock:
+        return list(_world.closures.values())
+
+
+@app.post("/roads/closures")
+def close_road(req: CloseRoadRequest):
+    with _mutation():
+        try:
+            return simulator.close_road(_world, req.from_node, req.to_node, req.reason)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/roads/closures/{closure_id}/reopen")
+def reopen_road(closure_id: str, req: ResolveAlertRequest):
+    with _mutation():
+        if closure_id not in _world.closures:
+            raise HTTPException(status_code=404, detail="unknown road closure")
+        return simulator.reopen_road(_world, closure_id, req.resolution)
+
+
+@app.get("/health")
+def health():
+    with _lock:
+        if _runtime_error:
+            raise HTTPException(status_code=503, detail=_runtime_error)
+        return {"status": "ok", "revision": _world.revision, "simulation_time": _world.now.isoformat()}

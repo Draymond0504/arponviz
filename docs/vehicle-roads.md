@@ -53,6 +53,6 @@ pytest tests -q
 
 生成脚本使用仓库中的 Layout H 快照，不会自动从算法仓库拉取新版。更新参照快照时须重新生成并核对道路与新增机位、滑行道的交叉。更换路网后重启 API，使用新的 `APRONOPS_DB_PATH` 隔离旧拓扑的演示记录；看板布局缓存最多保留 10 秒。
 
-本次本地看板使用 `APRONOPS_DB_PATH=apronops-vehicle-h-v1.db`。此前数据库保留，均不提交 Git。
+车辆路网迁移时使用的 `apronops-vehicle-h-v1.db` 已保留。运行闭环版本默认使用 `apronops-operations-v1.db` 并支持现场恢复，详见 [运行与异常处置](operations.md)。数据库均不提交 Git。
 
 Docker Compose 将持久化卷挂载到 `/app/runtime` 存数据库，配置文件从镜像的 `/app/data` 读取。更新代码后执行 `docker compose up --build -d`，不会再被卷中遗留的旧 YAML 遮盖。同名卷中的原数据库仍保留。

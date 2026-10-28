@@ -16,12 +16,17 @@ TASK_VEHICLE_COMPAT = {
 
 def _compatible_idle_vehicles(task: Task, vehicles: list[Vehicle]) -> list[Vehicle]:
     allowed_types = TASK_VEHICLE_COMPAT.get(task.type.value, set())
-    return [v for v in vehicles if v.type.value in allowed_types and v.state == VehicleState.IDLE]
+    return [v for v in vehicles if v.type.value in allowed_types and v.state == VehicleState.IDLE
+            and v.current_task_id is None and v.next_node_id is None]
 
 
 def assign_nearest(task: Task, vehicles: list[Vehicle], layout: Layout) -> Optional[Vehicle]:
     """策略一：同类型空闲车辆中，按 (优先级降序不适用于单任务, 距任务起点最近) 选车。"""
     candidates = _compatible_idle_vehicles(task, vehicles)
+    try:
+        layout.shortest_path(task.origin, task.destination)
+    except ValueError:
+        return None
     if not candidates:
         return None
     best = None
@@ -43,7 +48,7 @@ def assign_deadline_urgency(task: Task, vehicles: list[Vehicle], layout: Layout,
 
 
 def pick_task_order(tasks: list[Task], strategy: str = "priority") -> list[Task]:
-    pending = [t for t in tasks if t.status.value == "PENDING"]
+    pending = [t for t in tasks if t.status.value in ("PENDING", "REASSIGNED")]
     if strategy == "deadline":
         return sorted(pending, key=lambda t: (t.deadline or t.created_at))
     return sorted(pending, key=lambda t: (-t.priority, t.created_at))

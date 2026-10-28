@@ -67,8 +67,8 @@ def check_battery(vehicle: Vehicle, required_pct: float, now: datetime) -> Event
 
 
 SUGGESTED_ACTION = {
-    "communication_lost": "标记车辆不可调度，关联任务转派",
-    "position_quality_degraded": "限制运行速度或触发安全停车",
-    "route_blocked": "尝试改道，失败则任务重分配",
+    "communication_lost": "停止车辆；未取货任务重新排队，已取货任务等待本车恢复",
+    "position_quality_degraded": "暂停作业；定位恢复后按原任务阶段续跑",
+    "route_blocked": "未驶入车辆绕行，已驶入或无路可走的车辆等待；恢复道路后继续",
     "battery_insufficient": "禁止接新任务，安排回充或转派",
 }
