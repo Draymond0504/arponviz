@@ -100,4 +100,19 @@ pytest tests -q
 
 “航班与穿越”页面可创建航班并生成行李、配餐、保障后检查任务，支持延误更新时间窗、前置任务门控及合成穿越场景。交叉点区分预测窗口、申请窗口与实际授予窗口，车辆与飞机在仿真冲突区内互斥通行。
 
-已有版本 1 运行快照可自动读取，升级后保存为版本 2，保持原有任务现场。使用方法、模型假设及接口见 [航班与穿越说明](docs/flights-and-crossings.md)。这仍是规则仿真，第三阶段将建立独立实验接口与基线。
+已有版本 1/2 运行快照可自动读取，升级后保存为版本 3，保持原有任务现场。使用方法、模型假设及接口见 [航班与穿越说明](docs/flights-and-crossings.md)。这仍是规则仿真，独立实验接口与基线见下节。
+
+
+## 可复现实验与离线回放（第三阶段）
+
+无需启动 API 或数据库即可运行两种规则策略，在同一种子生成的航班、穿越和故障输入上对比。实验会保存配置、源码版本、事件、轨迹、任务表及指标，并保留未完成任务和中断结果。
+
+```bash
+pip install -r requirements-experiments.txt
+python -m apronops.experiments.run \
+  --scenario configs/experiments/routing.yaml \
+  --seeds 1 2 3 \
+  --output results/experiments/routing-batch-001
+```
+
+每次使用新的输出目录。看板“实验回放”可选择本机实验或上传云服务器生成的 `replay.json`，拖动时间轴查看车辆、任务、封路与飞机管制，不依赖在线现场。批量运行、指标定义、可重复性边界和已知基地阻挡问题见 [实验与回放](docs/experiments.md)。滚动优化与 MARL 训练仍在后续阶段。

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from . import anomaly, crossings, kinematics, scheduler
+from . import anomaly, crossings, kinematics, policies, scheduler
 from .layout import Layout, load_layout
 from .models import (
     Alert,
@@ -23,7 +23,6 @@ from .models import (
     VehicleType,
 )
 from .state_machine import transition_task, transition_vehicle
-from .storage import AlertORM, EventORM, RuntimeSnapshotORM, TaskORM, VehicleORM, get_session
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -38,7 +37,7 @@ TRACK_MAXLEN = 80  # 每辆车保留的轨迹点数（内存环形缓冲，不�
 
 
 class World:
-    def __init__(self, layout: Layout, vehicles: dict[str, Vehicle], tasks: dict[str, Task]):
+    def __init__(self, layout: Layout, vehicles: dict[str, Vehicle], tasks: dict[str, Task], *, now=None, seed=None):
         self.layout = layout
         self.vehicles = vehicles
         self.tasks = tasks
@@ -52,21 +51,32 @@ class World:
         self.occupancies = {}
         self.crossing_tokens: dict[str, str] = {}
         self.revision = 0
-        self.now = datetime.utcnow()
+        self.now = now or datetime.utcnow()
+        self.seed = seed
+        self.rng = random.Random(seed)
+        self.id_counter = 0
+        self.distance_m = {vid: 0. for vid in vehicles}
+        self.empty_distance_m = {vid: 0. for vid in vehicles}
+        self.policy_name = 'priority_distance'
+        self.policy_timing = {'calls': 0, 'total_s': 0., 'max_s': 0.}
         self.home_node: dict[str, str] = {v.id: v.node_id for v in vehicles.values()}
         # 预填一个初始点，避免后台线程第一次 tick 前 /tracks 返回空列表
         self.tracks: dict[str, deque[tuple[datetime, float, float]]] = {
             v.id: deque([(self.now, v.x, v.y)], maxlen=TRACK_MAXLEN) for v in vehicles.values()
         }
 
+    def new_id(self):
+        self.id_counter += 1
+        return str(uuid.uuid4()) if self.seed is None else f"sim-{self.id_counter:09d}"
 
-def load_world(data_dir: Path | str = DATA_DIR) -> World:
+
+def load_world(data_dir: Path | str = DATA_DIR, *, now=None, seed=None) -> World:
     data_dir = Path(data_dir)
     layout = load_layout(str(data_dir / "apron_layout.yaml"))
 
     with open(data_dir / "vehicles_seed.yaml", "r", encoding="utf-8") as f:
         vraw = yaml.safe_load(f)["vehicles"]
-    now = datetime.utcnow()
+    now = now or datetime.utcnow()
     vehicles: dict[str, Vehicle] = {}
     for v in vraw:
         x, y = layout.node_xy(v["home_node"])
@@ -95,7 +105,7 @@ def load_world(data_dir: Path | str = DATA_DIR) -> World:
             created_at=now,
         )
 
-    return World(layout, vehicles, tasks)
+    return World(layout, vehicles, tasks, now=now, seed=seed)
 
 
 def inject_anomaly(world: World, anomaly_type: str, vehicle_id: str) -> Event:
@@ -128,7 +138,7 @@ def inject_anomaly(world: World, anomaly_type: str, vehicle_id: str) -> Event:
 
 
 def record_event(world: World, event_type: str, source: str, task_id=None, event_time=None, **payload) -> Event:
-    event = Event(id=str(uuid.uuid4()), timestamp=event_time or world.now, source=source,
+    event = Event(id=world.new_id(), timestamp=event_time or world.now, source=source,
                   event_type=event_type, severity=EventSeverity.INFO,
                   related_task_id=task_id, payload=payload)
     world.pending_events.append(event)
@@ -143,8 +153,9 @@ def _raise_alert(world: World, event: Event) -> Alert:
     vehicle = world.vehicles.get(event.source)
     if vehicle:
         event.related_task_id = vehicle.current_task_id
+    event.id = world.new_id()
     world.pending_events.append(event)
-    alert = Alert(id=str(uuid.uuid4()), event_id=event.id, anomaly_type=event.event_type,
+    alert = Alert(id=world.new_id(), event_id=event.id, anomaly_type=event.event_type,
                   impact_scope=[event.source], suggested_action=anomaly.SUGGESTED_ACTION.get(event.event_type, "人工核实"))
     world.alerts[alert.id] = alert
     if vehicle:
@@ -200,8 +211,8 @@ def close_road(world: World, from_node: str, to_node: str, reason: str) -> dict:
     for closure in world.closures.values():
         if tuple(sorted((closure['from_node'], closure['to_node']))) == key and closure['reopened_at'] is None:
             return closure
-    closure_id = str(uuid.uuid4())
-    event = Event(id=str(uuid.uuid4()), timestamp=world.now, source=f"road:{closure_id}",
+    closure_id = world.new_id()
+    event = Event(id=world.new_id(), timestamp=world.now, source=f"road:{closure_id}",
                   event_type="route_blocked", severity=EventSeverity.WARNING,
                   payload={"from_node": from_node, "to_node": to_node, "reason": reason})
     alert = _raise_alert(world, event)
@@ -289,9 +300,12 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
         if vehicle.next_node_id is None:
             if (not vehicle.planned_path or vehicle.planned_path[0] != vehicle.node_id
                     or vehicle.planned_path[-1] != vehicle.target_node_id
+                    or world.policy_name == 'deadline_forecast'
                     or any(layout.is_blocked(a, b) for a, b in zip(vehicle.planned_path, vehicle.planned_path[1:]))):
                 try:
-                    vehicle.planned_path = layout.shortest_path(vehicle.node_id, vehicle.target_node_id)
+                    vehicle.planned_path = policies.route(world, vehicle, vehicle.node_id, vehicle.target_node_id)
+                    record_event(world, 'route_planned', vehicle.id, vehicle.current_task_id,
+                                 path=vehicle.planned_path[:], policy=world.policy_name)
                 except ValueError:
                     _set_route_wait(world, vehicle, "无可通行路线，等待道路恢复")
                     return False
@@ -301,7 +315,7 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
             # A closure/repair can change the target mid-edge. Finish the current
             # open segment before replanning; retain the exact physical position.
             try:
-                vehicle.planned_path = [vehicle.node_id] + layout.shortest_path(vehicle.next_node_id, vehicle.target_node_id)
+                vehicle.planned_path = [vehicle.node_id] + policies.route(world, vehicle, vehicle.next_node_id, vehicle.target_node_id)
             except ValueError:
                 vehicle.planned_path = [vehicle.node_id, vehicle.next_node_id]
         step = min(remaining_dt, kinematics.PHYSICS_SUBSTEP_S)
@@ -330,6 +344,9 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
         if stop_distance is not None and stop_distance <= 1e-8:
             _set_route_wait(world, vehicle, crossing_reason)
             return False
+        if gap is not None and desired_speed <= 1e-8 and vehicle.current_speed_mps <= 1e-8:
+            _set_route_wait(world, vehicle, "前方车辆阻挡，等待通行")
+            return False
         _set_route_wait(world, vehicle, None)
 
         if desired_speed > vehicle.current_speed_mps:
@@ -350,6 +367,9 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
 
         vehicle.current_speed_mps = new_speed
         vehicle.edge_progress_m += travel
+        world.distance_m[vehicle.id] = world.distance_m.get(vehicle.id, 0.) + travel
+        if vehicle.task_phase in ('to_origin', 'returning'):
+            world.empty_distance_m[vehicle.id] = world.empty_distance_m.get(vehicle.id, 0.) + travel
         vehicle.battery = max(0.0, vehicle.battery - travel * BATTERY_DRAIN_PER_M)
         ax, ay = layout.node_xy(vehicle.node_id)
         bx, by = layout.node_xy(vehicle.next_node_id)
@@ -434,15 +454,21 @@ def _run_anomaly_checks(world: World, now: datetime, random_inject_prob: float =
         if event:
             _raise_alert(world, event)
             continue
-        if random_inject_prob and random.random() < random_inject_prob and vehicle.current_task_id:
+        if random_inject_prob and world.rng.random() < random_inject_prob and vehicle.current_task_id:
             required = vehicle.speed_mps * 60 * BATTERY_DRAIN_PER_M
             event = anomaly.check_battery(vehicle, required, now)
             if event:
                 _raise_alert(world, event)
 
 
+def get_session():
+    from .storage import get_session as storage_session
+    return storage_session()
+
+
 def _persist(world: World) -> None:
     from .checkpoint import dump_world
+    from .storage import AlertORM, EventORM, RuntimeSnapshotORM, TaskORM, VehicleORM
 
     session = get_session()
     try:
@@ -461,7 +487,7 @@ def _persist(world: World) -> None:
         session.close()
 
 
-def tick(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0) -> None:
+def advance(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0, observer=None) -> None:
     import math
 
     if not math.isfinite(dt) or dt <= 0:
@@ -469,8 +495,8 @@ def tick(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0) -> Non
     end = world.now + timedelta(seconds=dt)
     while world.now < end:
         crossings.update_crossings(world)
-        for task in scheduler.pick_task_order(list(world.tasks.values()), now=world.now):
-            vehicle = scheduler.assign_nearest(task, list(world.vehicles.values()), world.layout)
+        for task in policies.task_order(world):
+            vehicle = policies.select_vehicle(world, task)
             if vehicle:
                 _start_assignment(world, vehicle, task, world.now)
         # Advance every vehicle on the same clock. Split also at externally
@@ -484,9 +510,17 @@ def tick(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0) -> Non
         for vehicle in world.vehicles.values():
             _advance_vehicle(world, vehicle, step, step_end)
         world.now = step_end
+        crossings.update_crossings(world)
+        if observer:
+            observer(world, step)
     crossings.update_crossings(world)
     for vehicle in world.vehicles.values():
         world.tracks.setdefault(vehicle.id, deque(maxlen=TRACK_MAXLEN)).append((world.now, vehicle.x, vehicle.y))
     _run_anomaly_checks(world, world.now, random_anomaly_prob)
     world.revision += 1
+
+
+def tick(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0) -> None:
+    """Live adapter: same engine as experiments, then one database transaction."""
+    advance(world, dt, random_anomaly_prob)
     _persist(world)

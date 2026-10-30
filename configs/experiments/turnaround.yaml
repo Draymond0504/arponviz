@@ -1,0 +1,39 @@
+schema_version: 1
+id: turnaround
+start_time: '2026-01-01T00:00:00Z'
+description: '合成航班保障、穿越预测误差及车辆故障；用于实验接口验收，非论文结果。'
+horizon_s: 2400
+step_s: 0.5
+sample_s: 5
+flights:
+  - id: EXP_WEST
+    stand_id: SP_07
+    arrival_s: 30
+    arrival_jitter_s: 10
+    turnaround_s: 1700
+  - id: EXP_EAST
+    stand_id: SP_20
+    arrival_s: 100
+    arrival_jitter_s: 20
+    turnaround_s: 1800
+crossings:
+  - id: WEST_PASS
+    crossing_id: X_04
+    aircraft_id: SYN_A1
+    predicted_start_s: 140
+    duration_s: 90
+    request_shift_s: 20
+    shift_jitter_s: 15
+  - id: EAST_PASS
+    crossing_id: X_11
+    aircraft_id: SYN_A2
+    predicted_start_s: 180
+    duration_s: 120
+    request_shift_s: 15
+    shift_jitter_s: 10
+faults:
+  - id: TRACTOR_SIGNAL
+    start_s: 60
+    end_s: 120
+    vehicle_id: TRACTOR_01
+    anomaly_type: communication_lost

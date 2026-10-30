@@ -1,14 +1,21 @@
-"""Streamlit 看板：运行总览 / 异常处置 / 运营复盘。"""
+"""Streamlit 看板：现场运行、航班穿越、异常处置和离线实验回放。"""
 from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
+import sys
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+
+# Streamlit may execute the file outside the repository working directory.
+if str(Path(__file__).resolve().parents[2]) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from apronops.experiments.replay import frame_tracks, load_replay
 
 API_BASE = os.environ.get("APRONOPS_API_BASE", "http://localhost:8000")
 
@@ -320,7 +327,7 @@ def live_flights():
         st.caption("窗口时间为北京时间。actual_start / actual_end 是仿真实际授予的占用时间；区内有车辆时会延迟授予。")
 
 
-page = st.sidebar.radio("导航", ["运行总览", "航班与穿越", "异常处置", "运营复盘"])
+page = st.sidebar.radio("导航", ["运行总览", "航班与穿越", "异常处置", "运营复盘", "实验回放"])
 
 if page == "运行总览":
     st.title("运行总览")
@@ -476,6 +483,45 @@ elif page == "异常处置":
             except requests.RequestException as error:
                 st.error(error_text(error))
     live_alerts()
+
+elif page == "实验回放":
+    st.title("实验回放")
+    st.caption("读取实验日志，不推进当前运行现场。可拖动时间轴核对车辆、任务、交叉管制和封路情况。")
+    results_root = Path(os.environ.get("APRONOPS_RESULTS_DIR", str(Path(__file__).resolve().parents[2] / "results/experiments")))
+    local_files = sorted(results_root.glob("*/*/replay.json")) + sorted(results_root.glob("*/replay.json"))
+    local_files = [p for p in local_files if p.resolve().is_relative_to(results_root.resolve())]
+    uploaded = st.file_uploader("上传实验 replay.json", type=["json"])
+    chosen = st.selectbox("本机实验结果", [None]+local_files,
+                           format_func=lambda p: "请选择实验" if p is None else str(p.relative_to(results_root)))
+    if uploaded is not None or chosen is not None:
+        try:
+            if uploaded is None and chosen.stat().st_size > 100*1024*1024:
+                raise ValueError("回放文件超过 100 MB")
+            data = load_replay(uploaded.getvalue() if uploaded is not None else chosen.read_bytes())
+            manifest, frames = data["manifest"], data["frames"]
+            st.write(f"场景 {manifest['scenario_id']} · 策略 {manifest['policy']} · 种子 {manifest['seed']}")
+            if manifest["status"] != "completed":
+                st.warning(f"此次实验状态为 {manifest['status']}，以下仅展示已保存的部分结果。")
+            index = st.slider("回放帧", 0, len(frames)-1, 0) if len(frames)>1 else 0
+            frame = frames[index]
+            st.caption(f"仿真经过 {frame['elapsed_s']:.1f} 秒 · {frame['simulation_time']} UTC")
+            closed = {frozenset((c['from_node'],c['to_node'])) for c in frame.get('closures',[]) if not c['reopened_at']}
+            layout = {**data['layout'], 'crossings': frame.get('crossings',[]),
+                      'edges': [{**e, 'closed': frozenset((e['from'],e['to'])) in closed} for e in data['layout']['edges']]}
+            st.plotly_chart(build_topology_figure(layout, frame['vehicles'], frame_tracks(frames,index), []),
+                            use_container_width=True, key="replay_map")
+            st.subheader("当前帧任务")
+            st.dataframe(pd.DataFrame(frame['tasks']), use_container_width=True)
+            st.subheader("当前帧车辆")
+            st.dataframe(pd.DataFrame([{k: v.get(k) for k in ('id','state','current_task_id','current_speed_mps','wait_reason')}
+                                       for v in frame['vehicles']]), use_container_width=True)
+            st.subheader("整次实验汇总（截至运行停止）")
+            st.json(data['summary'])
+            st.caption("未完成任务保留在完成率分母；延误下界包含未完成任务截至停止时刻的延误。回放轨迹按采样帧显示。")
+        except (ValueError, OSError) as error:
+            st.error(str(error))
+    else:
+        st.info("先运行批量实验，或上传云服务器生成的 replay.json。")
 
 else:
     st.title("运营复盘")

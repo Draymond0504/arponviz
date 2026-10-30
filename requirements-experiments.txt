@@ -1,0 +1,3 @@
+# CPU-only headless engine; API, dashboard and database are optional.
+pydantic==2.9.2
+PyYAML==6.0.2

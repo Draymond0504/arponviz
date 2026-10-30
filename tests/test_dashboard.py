@@ -108,3 +108,38 @@ def test_flight_page_demo_delay_and_crossing_request(client):
     assert_clean(app)
     assert len(client.get('/flights').json()) == 2
     assert len([t for t in client.get('/tasks').json() if t['flight_id']]) == 6
+
+
+def test_experiment_replay_scrub_without_live_api(tmp_path, monkeypatch):
+    from apronops.experiments.run import run_one
+    from apronops.experiments.scenario import Scenario
+    dest = tmp_path/'batch/run'
+    run_one(Scenario(id='ui', horizon_s=3, sample_s=.5, closures=[
+        dict(id='closure', start_s=1, end_s=2, from_node='DEPOT_AMR', to_node='R_009')]),
+        1, 'priority_distance', dest)
+    monkeypatch.setenv('APRONOPS_RESULTS_DIR', str(tmp_path))
+    calls = []
+    def offline(*args, **kwargs):
+        calls.append(args)
+        raise requests.ConnectionError('offline')
+    monkeypatch.setattr(requests, 'get', offline)
+    monkeypatch.setattr(requests, 'post', offline)
+    app = AppTest.from_file(APP, default_timeout=20).run()
+    app.sidebar.radio[0].set_value('实验回放').run()
+    calls.clear()
+    app.selectbox[0].select(dest/'replay.json').run()
+    assert_clean(app)
+    assert len(app.get('plotly_chart')) == 1
+    app.slider[0].set_value(2).run()
+    assert_clean(app)
+    chart = json.loads(app.get('plotly_chart')[0].proto.spec)
+    assert any(t.get('name') == '封闭路段' for t in chart['data'])
+    app.slider[0].set_value(6).run()
+    assert_clean(app)
+    chart = json.loads(app.get('plotly_chart')[0].proto.spec)
+    assert not any(t.get('name') == '封闭路段' for t in chart['data'])
+    assert not calls
+    (dest/'replay.json').write_text('{"bad": true}')
+    app.run()
+    assert not app.exception
+    assert app.error

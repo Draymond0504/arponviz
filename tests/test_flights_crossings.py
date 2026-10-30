@@ -177,7 +177,7 @@ def test_v1_snapshot_migrates_without_losing_existing_tasks():
     restored = checkpoint.restore_world(world.layout, p)
     assert set(restored.tasks) == set(world.tasks)
     assert not restored.flights and not restored.occupancies
-    assert checkpoint.dump_world(restored)['version'] == 2
+    assert checkpoint.dump_world(restored)['version'] == checkpoint.SNAPSHOT_VERSION
 
 
 def test_new_snapshot_preserves_flights_requests_and_gate_ownership():

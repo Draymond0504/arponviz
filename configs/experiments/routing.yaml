@@ -1,0 +1,36 @@
+schema_version: 1
+id: routing
+start_time: '2026-01-01T00:00:00Z'
+description: '合成规则基线压力场景：任务截止时间、长穿越窗口与服务点竞争。'
+horizon_s: 1800
+step_s: 0.5
+sample_s: 5
+tasks:
+  - id: EAST_URGENT
+    type: baggage_tow
+    origin: DEPOT_BAG_E
+    destination: SP_20
+    priority: 1
+    deadline_s: 600
+    service_duration_s: 90
+  - id: WEST_HIGH_PRIORITY
+    type: baggage_tow
+    origin: DEPOT_BAG_W
+    destination: SP_07
+    priority: 5
+    deadline_s: 1600
+    service_duration_s: 120
+  - id: INSPECT_NORTH
+    type: inspection
+    origin: DEPOT_AMR
+    destination: CHECK_N
+    deadline_s: 700
+    service_duration_s: 60
+crossings:
+  - id: EAST_RESTRICTION
+    crossing_id: X_11
+    aircraft_id: SYN_CROSS
+    predicted_start_s: 100
+    duration_s: 500
+    request_shift_s: 20
+    shift_jitter_s: 10

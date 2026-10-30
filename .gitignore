@@ -10,6 +10,8 @@ __pycache__/
 
 # Local tooling and generated artefacts
 _shots/
+.playwright-cli/
+output/playwright/
 .claude/settings.local.json
 *.log
 .DS_Store

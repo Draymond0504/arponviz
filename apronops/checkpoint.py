@@ -11,9 +11,8 @@ from collections import deque
 from datetime import datetime
 
 from .models import Alert, CrossingOccupancy, Flight, Task, Vehicle
-from .storage import AlertORM, EventORM, RuntimeSnapshotORM, TaskORM, VehicleORM, get_session
 
-SNAPSHOT_VERSION = 2
+SNAPSHOT_VERSION = 3
 
 
 def layout_fingerprint(layout) -> str:
@@ -31,6 +30,8 @@ def dump_world(world) -> dict:
         'version': SNAPSHOT_VERSION,
         'layout_fingerprint': layout_fingerprint(world.layout),
         'now': world.now.isoformat(), 'revision': world.revision,
+        'seed': world.seed, 'rng_state': json.loads(json.dumps(world.rng.getstate())), 'id_counter': world.id_counter,
+        'policy_name': world.policy_name, 'distance_m': world.distance_m, 'empty_distance_m': world.empty_distance_m,
         'vehicles': [v.model_dump(mode='json') for v in world.vehicles.values()],
         'tasks': [t.model_dump(mode='json') for t in world.tasks.values()],
         'alerts': [a.model_dump(mode='json') for a in world.alerts.values()],
@@ -50,7 +51,7 @@ def restore_world(layout, payload):
     from .models import VehicleState
     from .simulator import TRACK_MAXLEN, World
 
-    if payload.get('version') not in (1, SNAPSHOT_VERSION):
+    if payload.get('version') not in (1, 2, SNAPSHOT_VERSION):
         raise ValueError('Unsupported runtime snapshot version; use a separate APRONOPS_DB_PATH.')
     if payload.get('layout_fingerprint') != layout_fingerprint(layout):
         raise ValueError('Road layout differs from saved runtime; use a separate APRONOPS_DB_PATH.')
@@ -58,6 +59,15 @@ def restore_world(layout, payload):
                   {t['id']: Task.model_validate(t) for t in payload['tasks']})
     world.now = datetime.fromisoformat(payload['now'])
     world.revision = payload['revision']
+    world.seed = payload.get('seed')
+    if 'rng_state' in payload:
+        def tuplify(value):
+            return tuple(tuplify(v) for v in value) if isinstance(value, (list, tuple)) else value
+        world.rng.setstate(tuplify(payload['rng_state']))
+    world.id_counter = payload.get('id_counter', 0)
+    world.policy_name = payload.get('policy_name', 'priority_distance')
+    world.distance_m = dict(payload.get('distance_m', world.distance_m))
+    world.empty_distance_m = dict(payload.get('empty_distance_m', world.empty_distance_m))
     world.alerts = {a['id']: Alert.model_validate(a) for a in payload['alerts']}
     world.home_node = dict(payload['home_node'])
     world.crossing_wait = dict(payload['crossing_wait'])
@@ -77,6 +87,7 @@ def restore_world(layout, payload):
 
 
 def load_or_create_world():
+    from .storage import AlertORM, EventORM, RuntimeSnapshotORM, TaskORM, VehicleORM, get_session
     from .simulator import load_world, _persist
 
     seed = load_world()
