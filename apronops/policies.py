@@ -7,7 +7,7 @@ from time import perf_counter
 
 from . import scheduler
 
-POLICY_VERSION = 'rules-v2-depots'
+POLICY_VERSION = 'rules-v3-aircraft'
 POLICIES = {
     'priority_distance': '优先级＋最近车辆＋最短距离',
     'deadline_forecast': '截止时间优先＋预计完成时间选车＋预测等待路径',
@@ -89,7 +89,8 @@ def route(world, vehicle, start, target):
 
 
 def task_order(world):
-    return scheduler.pick_task_order(list(world.tasks.values()),
+    from .aircraft import task_ready
+    return scheduler.pick_task_order([t for t in world.tasks.values() if task_ready(world,t)],
             strategy='deadline' if world.policy_name == 'deadline_forecast' else 'priority', now=world.now)
 
 
@@ -144,13 +145,14 @@ def rolling_assignments(world):
     if world.next_dispatch_at and world.now < world.next_dispatch_at:
         return []
     world.next_dispatch_at = world.now + timedelta(seconds=ROLLING_INTERVAL_S)
-    pending = scheduler.pick_task_order(list(world.tasks.values()), strategy='deadline', now=world.now)
+    from .aircraft import task_ready
+    pending = scheduler.pick_task_order([t for t in world.tasks.values() if task_ready(world,t)], strategy='deadline', now=world.now)
     # Aging prevents an endless stream of new urgent jobs hiding old work.
     pending.sort(key=lambda t: (-int((world.now-t.created_at).total_seconds()//300),
                                 t.deadline or t.created_at, -t.priority, t.id))
     tasks = pending[:MAX_TASKS]
     vehicles = sorted([v for v in world.vehicles.values() if v.state == VehicleState.IDLE
-                       and v.current_task_id is None and v.next_node_id is None and v.target_node_id is None], key=lambda v:v.id)[:MAX_VEHICLES]
+                       and v.current_task_id is None and v.next_node_id is None and v.target_node_id is None], key=lambda v:v.id)
     if not tasks or not vehicles:
         return []
     started = perf_counter()
@@ -166,6 +168,21 @@ def rolling_assignments(world):
                     continue
                 late = max(0., (finish-t.deadline).total_seconds()) if t.deadline else 0.
                 costs[i,j] = t.priority*late + .01*(finish-world.now).total_seconds()
+        if len(vehicles)>MAX_VEHICLES:
+            # Cover each pending task type before filling the bounded search.
+            # Truncating alphabetical IDs can permanently omit every tractor.
+            selected=[]
+            for kind in dict.fromkeys(t.type for t in tasks):
+                candidates=[(cost,vehicles[j].id,j) for (i,j),cost in costs.items()
+                            if tasks[i].type==kind and j not in selected]
+                if candidates:
+                    selected.append(min(candidates)[2])
+            remaining=sorted((min(cost for (i,k),cost in costs.items() if k==j),vehicles[j].id,j)
+                             for j in range(len(vehicles)) if j not in selected and any(k==j for _,k in costs))
+            selected.extend(j for _,_,j in remaining[:MAX_VEHICLES-len(selected)])
+            costs={(i,new):costs[i,old] for new,old in enumerate(selected)
+                   for i in range(len(tasks)) if (i,old) in costs}
+            vehicles=[vehicles[j] for j in selected]
         deferred = {i:min((c for (k,_),c in costs.items() if k==i),default=0.)
                     + (t.priority+.01)*ROLLING_INTERVAL_S for i,t in enumerate(tasks)}
         best_key, best_pairs = (1, float('inf'), ()), []

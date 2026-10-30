@@ -53,7 +53,7 @@ VEHICLE_MARKER_COLOR = "#52514e"
 ANOMALOUS_STATES = {"DEGRADED", "PAUSED", "SAFE_STOP", "REMOTE_ASSIST"}
 
 
-def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_aircraft=False, route=None):
+def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_aircraft=False, route=None, aircraft=None):
     """机坪拓扑（作业点+连接边）叠加车辆轨迹与当前位置。
 
     保留真实坐标，默认悬停查看车名；高亮车辆通过引线标签辨认。
@@ -64,7 +64,7 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_air
     node_by_id = {n["id"]: n for n in nodes}
     reference = layout_data.get("reference", {})
     ref_nodes = {n["id"]: n for n in reference.get("nodes", [])}
-    if show_aircraft:
+    if show_aircraft or aircraft:
         xs, ys = [], []
         for e in reference.get("edges", []):
             a, b = ref_nodes[e["from"]], ref_nodes[e["to"]]
@@ -197,6 +197,13 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_air
                                bgcolor='rgba(255,255,255,0.95)', borderpad=4,
                                font=dict(color=color, size=11))
 
+    for plane in aircraft or []:
+        if plane['state'] in ('scheduled','departed'):
+            continue
+        fig.add_trace(go.Scatter(x=[plane['x']],y=[plane['y']],mode='markers',
+            marker=dict(symbol='arrow',size=22,color='#8057b2',angle=90-plane.get('heading_deg',0)),
+            name='航空器 '+plane['id'],showlegend=False,
+            hovertemplate=f"航空器 {escape(plane['id'])}<br>{escape(plane['state'])}<br>{escape(plane.get('wait_reason',''))}<extra></extra>"))
     fig.update_layout(
         height=700,
         margin=dict(l=20, r=20, t=20, b=40),
@@ -257,7 +264,7 @@ def live_overview(layout_data, highlight_ids, show_aircraft, route_endpoints):
         except requests.RequestException as error:
             st.warning(f"路线更新失败：{error_text(error)}")
     st.plotly_chart(build_topology_figure(current_layout, vehicles, state["tracks"], highlight_ids,
-                                        show_aircraft, route), use_container_width=True, key="live_map")
+                                        show_aircraft, route, state.get('aircraft',[])), use_container_width=True, key="live_map")
     st.caption('车辆名称悬停查看；高亮车辆显示引线标签。聚集车辆保留真实位置，可放大查看，或在车辆表核对等待原因。')
     st.subheader("车辆状态")
     if vehicles:
@@ -350,6 +357,10 @@ def live_flights():
     else:
         st.info("尚未录入航班，可创建计划或载入合成演示。")
     st.subheader("交叉区通行状态")
+    if state.get('aircraft'):
+        st.subheader('航空器滑行与实际到离位')
+        st.dataframe(pd.DataFrame(state['aircraft'])[['id','flight_id','state','current_speed_mps',
+            'wait_reason','actual_arrival_at','actual_departure_at','actual_exit_at']],use_container_width=True)
     st.dataframe(pd.DataFrame(state["crossings"])[["id", "status", "aircraft", "waiting_aircraft", "vehicles", "radius_m"]], use_container_width=True)
     if state["occupancies"]:
         st.subheader("飞机占用窗口")
@@ -360,7 +371,7 @@ def live_flights():
         st.caption("窗口时间为北京时间。actual_start / actual_end 是仿真实际授予的占用时间；区内有车辆时会延迟授予。")
 
 
-page = st.sidebar.radio("导航", ["运行总览", "航班与穿越", "异常处置", "运营复盘", "实验回放"])
+page = st.sidebar.radio("导航", ["运行总览", "航班与穿越", "异常处置", "运营复盘", "实验回放", "实验对比"])
 
 if page == "运行总览":
     st.title("运行总览")
@@ -436,6 +447,13 @@ elif page == "航班与穿越":
         except requests.RequestException as error:
             st.error(error_text(error))
     stands = [n["id"] for n in layout_data["nodes"] if n["type"] == "service_point"]
+    if st.button('载入航空器协同演示'):
+        try:
+            api_post('/scenarios/aircraft-demo')
+            st.success('已添加 1 架航空器与 3 项保障任务。约 10 秒仿真时间后开始进场滑行；运行总览可查看飞机。重复点击不重复创建。')
+            state=api_get('/state')
+        except requests.RequestException as error:
+            st.error(error_text(error))
     with st.form("flight_create"):
         st.subheader("创建航班计划")
         c1, c2 = st.columns(2)
@@ -454,6 +472,18 @@ elif page == "航班与穿越":
             except requests.RequestException as error:
                 st.error(error_text(error))
     if state["flights"]:
+        with st.expander('为航班添加航空器运行'):
+            with st.form('aircraft_create'):
+                aid=st.text_input('航空器运行 ID',value='AC_001')
+                aflight=st.selectbox('关联航班', [f['id'] for f in state['flights']])
+                taxi_delay=st.number_input('距当前仿真时间进场（秒）',min_value=0,value=10)
+                st.caption('从航空器入口 900 滑行至航班机位，保障完成且车辆撤离后滑行至出口 901。仅支持尚未开始保障的航班；单架航空器获得滑行放行。')
+                if st.form_submit_button('加入航空器仿真'):
+                    try:
+                        api_post('/aircraft',json={'id':aid,'flight_id':aflight,'taxi_start_offset_s':taxi_delay})
+                        st.success('航空器计划已保存，保障任务将等待实际到位。')
+                    except requests.RequestException as error:
+                        st.error(error_text(error))
         with st.form("flight_delay"):
             st.subheader("更新航班计划")
             by_id = {f["id"]: f for f in state["flights"]}
@@ -530,6 +560,10 @@ elif page == "异常处置":
                 st.error(error_text(error))
     live_alerts()
 
+elif page == '实验对比':
+    from apronops.dashboard.study_view import render
+    render()
+
 elif page == "实验回放":
     st.title("实验回放")
     st.caption("完整动画支持播放、暂停、倍速与拖动进度；读取实验日志，不推进当前运行现场。")
@@ -560,7 +594,7 @@ elif page == "实验回放":
             closed = {frozenset((c['from_node'],c['to_node'])) for c in frame.get('closures',[]) if not c['reopened_at']}
             layout = {**data['layout'], 'crossings': frame.get('crossings',[]),
                       'edges': [{**e, 'closed': frozenset((e['from'],e['to'])) in closed} for e in data['layout']['edges']]}
-            st.plotly_chart(build_topology_figure(layout, frame['vehicles'], frame_tracks(frames,index), []),
+            st.plotly_chart(build_topology_figure(layout, frame['vehicles'], frame_tracks(frames,index), [], aircraft=frame.get('aircraft',[])),
                             use_container_width=True, key="replay_map")
             st.subheader("当前帧任务")
             st.dataframe(pd.DataFrame(frame['tasks']), use_container_width=True)

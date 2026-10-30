@@ -111,6 +111,32 @@ class CrossingOccupancy(BaseModel):
     source: str = "synthetic"
 
 
+class Aircraft(BaseModel):
+    id: str
+    flight_id: str
+    entry_node: str = '900'
+    exit_node: str = '901'
+    taxi_start_at: datetime
+    speed_mps: float = Field(default=4., gt=0, le=10, allow_inf_nan=False)
+    length_m: float = Field(default=12., gt=0, le=40, allow_inf_nan=False)
+    state: str = 'scheduled'
+    node_id: str = ''
+    next_node_id: Optional[str] = None
+    x: float = 0.
+    y: float = 0.
+    heading_deg: float = 0.
+    current_speed_mps: float = 0.
+    route: list[str] = Field(default_factory=list)
+    route_progress_m: float = 0.
+    distance_m: float = 0.
+    wait_s: float = 0.
+    wait_reason: str = ''
+    crossing_handles: dict[str, str] = Field(default_factory=dict)
+    actual_arrival_at: Optional[datetime] = None
+    actual_departure_at: Optional[datetime] = None
+    actual_exit_at: Optional[datetime] = None
+
+
 class Event(BaseModel):
     id: str
     timestamp: datetime

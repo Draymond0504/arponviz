@@ -167,3 +167,16 @@ def test_policy_form_and_depot_capacity_display(client):
     assert client.get('/dispatch/policies').json()['current']=='rolling_optimization'
     assert client.post('/dispatch/policy',params={'policy':'invalid'}).status_code==400
     assert len(client.get('/state').json()['depots'])==5
+
+
+def test_aircraft_demo_form_is_repeat_safe_and_visible(client):
+    app=AppTest.from_file(APP,default_timeout=20).run()
+    app.sidebar.radio[0].set_value('航班与穿越').run()
+    button(app,'载入航空器协同演示').click().run()
+    assert_clean(app)
+    button(app,'载入航空器协同演示').click().run()
+    assert_clean(app)
+    assert len(client.get('/aircraft').json())==1
+    state=client.get('/state').json()
+    assert len([t for t in state['tasks'] if t['flight_id']=='DEMO_AIRCRAFT_01'])==3
+    assert all(t['wait_reason']=='等待航空器实际到位' for t in state['tasks'] if t['flight_id']=='DEMO_AIRCRAFT_01')

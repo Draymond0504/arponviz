@@ -57,7 +57,7 @@ def load_replay(data: bytes):
         layout = raw['layout']
         ids = _graph(layout, required=True)
         _require(isinstance(layout.get('metadata', {}), dict))
-        _graph(layout.get('reference', {}))
+        aircraft_ids = _graph(layout.get('reference', {}))
         frames = _list(raw['frames'])
         _require(0 < len(frames) <= 200000, '回放帧数量无效')
         previous = -1.
@@ -79,6 +79,13 @@ def load_replay(data: bytes):
                     _require(isinstance(node, str) and node in ids)
             for task in _list(frame['tasks']):
                 _strings(task, ('id', 'type', 'status'))
+            for plane in _list(frame.get('aircraft', [])):
+                _strings(plane, ('id','flight_id','state','node_id','wait_reason'))
+                _require(plane['state'] in ('scheduled','taxi_in','parked','taxi_out','departed'))
+                for key in ('x','y','heading_deg','current_speed_mps'):
+                    _number(plane[key])
+                _require(plane['node_id'] in aircraft_ids)
+                _require(plane.get('next_node_id') is None or plane['next_node_id'] in aircraft_ids)
             for crossing in _list(frame.get('crossings', [])):
                 _strings(crossing, ('id', 'status'))
                 _require(crossing['id'] in ids)

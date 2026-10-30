@@ -1,0 +1,12 @@
+schema_version: 1
+id: air_ground_sensitivity
+horizon_s: 4800
+sample_s: 10
+seeds: [1, 2, 3]
+policies: [priority_distance, deadline_forecast, rolling_optimization]
+conditions:
+  - {id: baseline, label: '基准：1 航班 / 5 辆车 / 2 泊位 / 1 次故障'}
+  - {id: demand_high, label: '需求增加：3 航班', flight_count: 3}
+  - {id: fleet_large, label: '车队扩大：10 辆车', fleet_copies: 2}
+  - {id: capacity_tight, label: '容量收紧：每基地 1 泊位', depot_capacity: 1}
+  - {id: faults_high, label: '故障增加：3 次', fault_count: 3}

@@ -55,7 +55,7 @@ def update_crossings(world):
         if not vehicle_in_zone(world, world.vehicles[vid], cid):
             del world.crossing_tokens[cid]
     for request in sorted(world.occupancies.values(), key=lambda r: (r.requested_start, r.id)):
-        if request.status == 'active' and world.now >= request.actual_end:
+        if request.source != 'aircraft_motion' and request.status == 'active' and world.now >= request.actual_end:
             request.status = 'completed'
             record_event(world, 'crossing_aircraft_exited', request.aircraft_id, occupancy_id=request.id)
         if request.status not in ('scheduled', 'waiting_clearance') or request.requested_start > world.now:

@@ -10,11 +10,11 @@ from datetime import timedelta
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
-from .. import crossings, facilities, flights, metrics, policies, scheduler, simulator
-from ..models import CrossingOccupancy, Flight, Task, TaskType
+from .. import aircraft, crossings, facilities, flights, metrics, policies, scheduler, simulator
+from ..models import Aircraft, CrossingOccupancy, Flight, Task, TaskType
 from ..checkpoint import load_or_create_world
 from ..storage import init_db
-from .schemas import CloseRoadRequest, CreateTaskRequest, FlightRequest, OccupancyRequest, ResolveAlertRequest
+from .schemas import AircraftRequest, CloseRoadRequest, CreateTaskRequest, FlightRequest, OccupancyRequest, ResolveAlertRequest
 
 @asynccontextmanager
 async def lifespan(app):
@@ -291,10 +291,11 @@ def get_state():
         return {
             "revision": _world.revision, "simulation_time": _world.now.isoformat(),
             "runtime_error": _runtime_error,
+            "aircraft": aircraft.rows(_world),
             "vehicles": [{**v.model_dump(), "wait_reason": _world.route_wait.get(v.id, ""),
                           "recovery_action":facilities.recovery_action(_world,v.id)}
                          for v in _world.vehicles.values()],
-            "tasks": [{**t.model_dump(), "wait_reason": scheduler.task_wait_reason(t, _world.tasks, _world.now)}
+            "tasks": [{**t.model_dump(), "wait_reason": '等待航空器实际到位' if not aircraft.task_ready(_world,t) else scheduler.task_wait_reason(t, _world.tasks, _world.now)}
                       for t in _world.tasks.values()],
             "flights": flights.flight_rows(_world),
             "occupancies": [r.model_dump() for r in _world.occupancies.values()],
@@ -363,6 +364,23 @@ def list_flights():
         return flights.flight_rows(_world)
 
 
+@app.get('/aircraft')
+def list_aircraft():
+    with _lock:
+        return aircraft.rows(_world)
+
+
+@app.post('/aircraft')
+def create_aircraft(req: AircraftRequest):
+    with _mutation():
+        try:
+            plane=Aircraft(**req.model_dump(exclude={'taxi_start_offset_s'}),
+                           taxi_start_at=_world.now+timedelta(seconds=req.taxi_start_offset_s))
+            return aircraft.register(_world,plane).model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=409,detail=str(exc))
+
+
 @app.post("/flights")
 def save_flight(req: FlightRequest):
     with _mutation():
@@ -394,3 +412,12 @@ def add_occupancy(req: OccupancyRequest):
 def load_turnaround_demo():
     with _mutation():
         return flights.load_demo(_world).model_dump()
+
+
+@app.post('/scenarios/aircraft-demo')
+def load_aircraft_demo():
+    with _mutation():
+        try:
+            return flights.load_aircraft_demo(_world).model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=409,detail=str(exc))

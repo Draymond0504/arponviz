@@ -1,0 +1,36 @@
+schema_version: 1
+id: aircraft_turnaround
+description: '航空器从入口滑行到 SP_07，完成保障后离位；实际位置驱动空地互锁。'
+start_time: '2026-01-01T00:00:00Z'
+horizon_s: 4800
+step_s: 0.5
+sample_s: 2
+flights:
+  - id: AIR_FLIGHT_01
+    stand_id: SP_07
+    announce_s: 0
+    arrival_s: 120
+    arrival_jitter_s: 20
+    turnaround_s: 2600
+aircraft:
+  - id: AC_001
+    flight_id: AIR_FLIGHT_01
+    taxi_start_s: 10
+    entry_node: '900'
+    exit_node: '901'
+    speed_mps: 4
+    length_m: 12
+tasks:
+  - id: NORTH_PATROL
+    type: inspection
+    origin: DEPOT_AMR
+    destination: CHECK_N
+    release_s: 0
+    deadline_s: 1200
+    service_duration_s: 60
+faults:
+  - id: CATER_POSITION
+    start_s: 700
+    end_s: 760
+    vehicle_id: CATERING_01
+    anomaly_type: position_quality_degraded

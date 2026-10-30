@@ -77,6 +77,24 @@ class DepotSpec(Spec):
     recovery_after_s: float = Field(default=30, gt=0)
 
 
+class VehicleSpec(Spec):
+    id: str = Field(min_length=1)
+    type: Literal['tractor','shuttle','catering','amr_inspect']
+    home_node: str
+    speed_mps: float = Field(gt=0, le=15)
+    battery: float = Field(default=100, ge=0, le=100)
+
+
+class AircraftSpec(Spec):
+    id: str = Field(min_length=1)
+    flight_id: str
+    entry_node: str = '900'
+    exit_node: str = '901'
+    taxi_start_s: float = Field(ge=0)
+    speed_mps: float = Field(default=4, gt=0, le=10)
+    length_m: float = Field(default=12, gt=0, le=40)
+
+
 class Scenario(Spec):
     schema_version: Literal[1] = 1
     id: str = Field(pattern=r'^[A-Za-z0-9_-]+$')
@@ -91,6 +109,8 @@ class Scenario(Spec):
     faults: list[FaultSpec] = Field(default_factory=list)
     tasks: list[TaskSpec] = Field(default_factory=list)
     depots: dict[str, DepotSpec] = Field(default_factory=dict)
+    vehicles: list[VehicleSpec] | None = Field(default=None, min_length=1)
+    aircraft: list[AircraftSpec] = Field(default_factory=list)
 
     @field_validator('start_time')
     @classmethod
@@ -105,9 +125,15 @@ class Scenario(Spec):
 
     @model_validator(mode='after')
     def validate_schedule(self):
-        for values in (self.flights, self.crossings, self.closures, self.faults, self.tasks):
+        for values in (self.flights, self.crossings, self.closures, self.faults, self.tasks, self.aircraft, self.vehicles or []):
             if len({v.id for v in values}) != len(values):
                 raise ValueError('duplicate IDs in scenario')
+        flight_by_id={f.id:f for f in self.flights}
+        if len({a.flight_id for a in self.aircraft}) != len(self.aircraft):
+            raise ValueError('only one aircraft per flight')
+        for a in self.aircraft:
+            if a.flight_id not in flight_by_id or not flight_by_id[a.flight_id].announce_s <= a.taxi_start_s <= self.horizon_s:
+                raise ValueError('aircraft requires announced flight and taxi start within horizon')
         for f in self.flights:
             if f.arrival_s-f.arrival_jitter_s < f.announce_s:
                 raise ValueError('flight may arrive before announcement')
@@ -155,6 +181,9 @@ def realize(scenario: Scenario, seed: int):
         events.append({'at_s': spec.announce_s, 'kind': 'crossing', 'id': spec.id, 'payload': payload})
     for spec in scenario.tasks:
         events.append({'at_s': 0., 'kind': 'task', 'id': spec.id, 'payload': spec.model_dump()})
+    for spec in scenario.aircraft:
+        announce = next(f.announce_s for f in scenario.flights if f.id==spec.flight_id)
+        events.append({'at_s':announce,'kind':'flight_aircraft','id':spec.id,'payload':spec.model_dump()})
     for kind, specs in (('closure', scenario.closures), ('fault', scenario.faults)):
         for spec in specs:
             events.extend([{'at_s': spec.start_s, 'kind': kind, 'id': spec.id, 'payload': spec.model_dump()},

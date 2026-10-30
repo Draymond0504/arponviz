@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from . import anomaly, crossings, facilities, kinematics, policies, recovery, scheduler
+from . import aircraft, anomaly, crossings, facilities, kinematics, policies, recovery, scheduler
 from .layout import Layout, load_layout
 from .models import (
     Alert,
@@ -48,6 +48,8 @@ class World:
         self.closures: dict[str, dict] = {}
         self.suspended_state: dict[str, VehicleState] = {}
         self.flights = {}
+        self.aircraft = {}
+        self.aircraft_taxi_owner = None
         self.occupancies = {}
         self.crossing_tokens: dict[str, str] = {}
         self.revision = 0
@@ -71,15 +73,19 @@ class World:
         return str(uuid.uuid4()) if self.seed is None else f"sim-{self.id_counter:09d}"
 
 
-def load_world(data_dir: Path | str = DATA_DIR, *, now=None, seed=None) -> World:
+def load_world(data_dir: Path | str = DATA_DIR, *, now=None, seed=None, vehicle_seed=None, depot_overrides=None) -> World:
     data_dir = Path(data_dir)
     layout = load_layout(str(data_dir / "apron_layout.yaml"))
 
     with open(data_dir / "vehicles_seed.yaml", "r", encoding="utf-8") as f:
         vraw = yaml.safe_load(f)["vehicles"]
+    if vehicle_seed is not None:
+        vraw = vehicle_seed
     now = now or datetime.utcnow()
     vehicles: dict[str, Vehicle] = {}
     for v in vraw:
+        if v['home_node'] not in layout.nodes or layout.nodes[v['home_node']].type!='depot':
+            raise ValueError(f"invalid vehicle home depot: {v['home_node']}")
         x, y = layout.node_xy(v["home_node"])
         vehicles[v["id"]] = Vehicle(
             id=v["id"],
@@ -108,6 +114,8 @@ def load_world(data_dir: Path | str = DATA_DIR, *, now=None, seed=None) -> World
 
     depot_file = data_dir / 'depots.yaml'
     config = yaml.safe_load(depot_file.read_text(encoding='utf-8'))['depots'] if depot_file.exists() else None
+    if depot_overrides:
+        config = {**(config or {}), **depot_overrides}
     return World(layout, vehicles, tasks, now=now, seed=seed, depot_config=config)
 
 
@@ -522,6 +530,7 @@ def advance(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0, obs
     end = world.now + timedelta(seconds=dt)
     while world.now < end:
         facilities.cleanup(world)
+        aircraft.prepare(world)
         crossings.update_crossings(world)
         for task, vehicle in policies.assignments(world):
             _start_assignment(world, vehicle, task, world.now)
@@ -538,6 +547,7 @@ def advance(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0, obs
         for vehicle in world.vehicles.values():
             _advance_vehicle(world, vehicle, step, step_end)
         world.now = step_end
+        aircraft.advance(world, step)
         crossings.update_crossings(world)
         recovery.update(world, step)
         if observer:

@@ -69,3 +69,13 @@ class OccupancyRequest(Command):
         if self.predicted_end <= self.predicted_start or self.requested_end <= self.requested_start:
             raise ValueError('结束时间必须晚于开始时间')
         return self
+
+
+class AircraftRequest(Command):
+    id: str = Field(min_length=1, max_length=100)
+    flight_id: str
+    entry_node: str = '900'
+    exit_node: str = '901'
+    taxi_start_offset_s: float = Field(default=10, ge=0, allow_inf_nan=False)
+    speed_mps: float = Field(default=4, gt=0, le=10, allow_inf_nan=False)
+    length_m: float = Field(default=12, gt=0, le=40, allow_inf_nan=False)

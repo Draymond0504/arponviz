@@ -21,8 +21,8 @@ h1{font-size:20px;margin:0 0 5px}p{margin:0;color:#617489;font-size:12px}button,
 <label>跳至 <select id="moment"><option value="">关键时刻</option></select></label>
 <input class="progress" id="progress" aria-label="播放进度" type="range" min="0" step="0.1" value="0">
 </div>
-<div class="layout"><div class="map" id="map"><canvas id="canvas" aria-label="机坪车辆运行地图"></canvas><div class="legend"><span><b style="color:#247aca">●</b>车辆</span><span><b style="color:#df7337">●</b>等待/故障</span><span><b style="color:#d44848">━</b>封路/飞机占用</span><span>滚轮缩放 · 拖动平移 · 点击选车</span></div><div class="tip" id="tip"></div></div>
-<aside><h2>当前运行</h2><div class="stats"><div class="stat"><strong id="completed">0</strong>任务完成</div><div class="stat"><strong id="waiting">0</strong>等待车辆</div><div class="stat"><strong id="blocking">0</strong>未解除阻塞</div></div><div id="selection">悬停查看附近车辆；点击或下拉选择车辆，查看任务与等待原因。</div><h2>任务进度</h2><div id="tasks"></div><h2>基地泊位 / 排队</h2><div id="depots"></div><h2>当前管制与等待</h2><div id="conditions"></div></aside></div>
+<div class="layout"><div class="map" id="map"><canvas id="canvas" aria-label="机坪车辆运行地图"></canvas><div class="legend"><span><b style="color:#247aca">●</b>车辆</span><span><b style="color:#8057b2">✈</b>航空器</span><span><b style="color:#df7337">●</b>等待/故障</span><span><b style="color:#d44848">━</b>封路/飞机占用</span><span>滚轮缩放 · 拖动平移 · 点击选车</span></div><div class="tip" id="tip"></div></div>
+<aside><h2>当前运行</h2><div class="stats"><div class="stat"><strong id="completed">0</strong>任务完成</div><div class="stat"><strong id="waiting">0</strong>等待车辆</div><div class="stat"><strong id="blocking">0</strong>未解除阻塞</div></div><div id="selection">悬停查看附近车辆；点击或下拉选择车辆，查看任务与等待原因。</div><h2>航空器运行</h2><div id="aircraft"></div><h2>任务进度</h2><div id="tasks"></div><h2>基地泊位 / 排队</h2><div id="depots"></div><h2>当前管制与等待</h2><div id="conditions"></div></aside></div>
 <p class="notice">车辆位置保持采样记录。相邻采样间沿记录路段插值以呈现连续动画，任务与管制状态按采样帧更新；不能用插值画面判定物理子步安全。车名仅为所选车辆显示，密集车辆可放大或在下拉框逐辆查看。停驻基地采用逻辑泊位，同坐标可代表不同泊位。</p>
 </main>
 <script id="replay-data" type="application/json">__REPLAY_DATA__</script>
@@ -42,15 +42,17 @@ const stateNames={PENDING:'待分配',ASSIGNED:'前往起点 / 办理',IN_PROGRE
 $('subtitle').textContent=`${D.manifest.scenario_id} · ${D.manifest.policy} · 种子 ${D.manifest.seed} · ${D.manifest.status==='completed'?'完整运行':'部分运行：'+D.manifest.status}`;
 $('progress').min=begin;$('progress').max=end;
 const ids=[...new Set(F.flatMap(f=>f.vehicles.map(v=>v.id)))].sort();
+for(const id of [...new Set(F.flatMap(f=>(f.aircraft||[]).map(a=>a.id)))].sort()){const o=document.createElement('option');o.value='air:'+id;o.textContent='航空器 '+id;$('follow').append(o);}
 for(const id of ids){const o=document.createElement('option');o.value=id;o.textContent=id;$('follow').append(o);}
 // Summarize changes from saved frames without inventing events between samples.
-let prevConditions=new Set(),prevTasks=new Map(),prevRelocations=0;
+let prevConditions=new Set(),prevTasks=new Map(),prevRelocations=0,prevAircraft=new Map();
 for(const f of F){
  const conditions=new Set([...(f.closures||[]).filter(c=>!c.reopened_at).map(c=>'封路 '+c.from_node+' ↔ '+c.to_node),...(f.crossings||[]).filter(c=>c.aircraft.length).map(c=>'飞机占用 '+c.id)]);
  const changes=[...conditions].filter(c=>!prevConditions.has(c));
  for(const c of prevConditions)if(!conditions.has(c))changes.push('解除 '+c);
  for(const task of f.tasks)if(task.status==='COMPLETED'&&prevTasks.get(task.id)!=='COMPLETED')changes.push('完成 '+task.id);
  if((f.recovery?.relocations||0)>prevRelocations)changes.push('发起挪车恢复');
+ for(const a of f.aircraft||[]){if(a.state!==prevAircraft.get(a.id)&&a.state!=='scheduled')changes.push(a.id+' '+({taxi_in:'进场滑行',parked:'实际到位',taxi_out:'离位滑行',departed:'离场'}[a.state]||a.state));prevAircraft.set(a.id,a.state);}
  if(changes.length){const o=document.createElement('option');o.value=f.elapsed_s;o.textContent=fmt(f.elapsed_s)+' '+changes.join(' / ');$('moment').append(o);}
  prevConditions=conditions;prevTasks=new Map(f.tasks.map(q=>[q.id,q.status]));prevRelocations=f.recovery?.relocations||0;
 }
@@ -67,11 +69,12 @@ function position(a,b,ratio){
  return [a.x,a.y];
 }
 function rows(target,items){const el=$(target);el.replaceChildren();for(const [title,detail] of items){const row=document.createElement('div');row.className='row';const b=document.createElement('b');b.textContent=title;const span=document.createElement('span');span.className='muted';span.textContent=detail;row.append(b,span);el.append(row);}if(!items.length)el.textContent='无';}
-function details(f){const v=f.vehicles.find(v=>v.id===selected);$('selection').textContent=v?`${v.id}\n状态：${v.state} · 速度 ${(v.current_speed_mps||0).toFixed(1)} m/s\n任务：${v.current_task_id||'无'}\n阶段：${v.task_phase||'无'}\n等待：${v.wait_reason||'无'}\n恢复：${typeof v.recovery_action==='object'?JSON.stringify(v.recovery_action):v.recovery_action||'无'}`:'悬停查看附近车辆；点击或下拉选择车辆，查看任务与等待原因。';}
+function details(f){const v=selected.startsWith('air:')?(f.aircraft||[]).find(a=>'air:'+a.id===selected):f.vehicles.find(v=>v.id===selected);$('selection').textContent=v?`${v.id}\n状态：${v.state} · 速度 ${(v.current_speed_mps||0).toFixed(1)} m/s\n任务：${v.flight_id||v.current_task_id||'无'}\n阶段：${v.task_phase||'无'}\n等待：${v.wait_reason||'无'}\n恢复：${typeof v.recovery_action==='object'?JSON.stringify(v.recovery_action):v.recovery_action||'无'}`:'悬停查看附近车辆；点击或下拉选择车辆，查看任务与等待原因。';}
 function panel(f){
  $('completed').textContent=`${f.tasks.filter(q=>q.status==='COMPLETED').length}/${f.tasks.length}`;
  $('waiting').textContent=f.vehicles.filter(v=>v.wait_reason||faultStates.has(v.state)).length;
  $('blocking').textContent=f.recovery?.unresolved||0;
+ rows('aircraft',(f.aircraft||[]).map(a=>[a.id+' · '+a.flight_id,({scheduled:'等待进场',taxi_in:'进场滑行',parked:'机位停驻',taxi_out:'离位滑行',departed:'已离场'}[a.state]||a.state)+' · '+(a.wait_reason||'正常') ]));
  rows('tasks',f.tasks.map(q=>[q.id,`${stateNames[q.status]||q.status} · ${q.assigned_vehicle_id||'未分配'}${q.wait_reason?' · '+q.wait_reason:''}`]));
  rows('depots',(f.depots||[]).map(q=>[q.id,`占用 ${q.occupied} + 预留 ${q.reserved} / ${q.capacity} · 排队 ${q.queue_length} · 预计等待 ${q.predicted_wait_s==null?'未知':q.predicted_wait_s.toFixed(0)+'秒'}`]));
  rows('conditions',[...(f.closures||[]).filter(c=>!c.reopened_at).map(c=>['道路封闭',c.from_node+' ↔ '+c.to_node]),...(f.crossings||[]).filter(c=>c.aircraft.length||c.waiting_aircraft.length).map(c=>[c.id,c.status]),...f.vehicles.filter(v=>v.wait_reason||faultStates.has(v.state)).map(v=>[v.id,v.wait_reason||v.state])]);
@@ -84,8 +87,10 @@ function draw(){
  $('duration').textContent=playing?'约剩 '+Math.ceil((end-t)/Number($('speed').value))+' 秒':'';
  $('status').textContent=t>=end?'播放结束':playing?'正在播放':'已暂停';
  ctx.clearRect(0,0,width,height);
- if($('reference').checked){const rn=new Map((D.layout.reference?.nodes||[]).map(n=>[n.id,n]));for(const e of D.layout.reference?.edges||[]){const a=rn.get(e.from),b=rn.get(e.to);if(a&&b)line(project(a.x,a.y),project(b.x,b.y),'#d5dce3',1,[3,4]);}}
+ if($('reference').checked||(f.aircraft||[]).length){const rn=new Map((D.layout.reference?.nodes||[]).map(n=>[n.id,n]));for(const e of D.layout.reference?.edges||[]){const a=rn.get(e.from),b=rn.get(e.to);if(a&&b)line(project(a.x,a.y),project(b.x,b.y),'#d5dce3',1,[3,4]);}}
  const closed=new Set((f.closures||[]).filter(c=>!c.reopened_at).flatMap(c=>[c.from_node+'|'+c.to_node,c.to_node+'|'+c.from_node]));
+ const selectedPlane=(f.aircraft||[]).find(a=>'air:'+a.id===selected);
+ if(selectedPlane){const rn=new Map((D.layout.reference?.nodes||[]).map(n=>[n.id,n]));for(let j=1;j<selectedPlane.route.length;j++){const a=rn.get(selectedPlane.route[j-1]),b=rn.get(selectedPlane.route[j]);if(a&&b)line(project(a.x,a.y),project(b.x,b.y),'#946bc580',3);}}
  for(const e of D.layout.edges){const a=nodes.get(e.from),b=nodes.get(e.to),isClosed=closed.has(e.from+'|'+e.to);line(project(a.x,a.y),project(b.x,b.y),isClosed?'#d44848':colors[e.road_type]||colors.service,isClosed?5:e.road_type==='perimeter'?4:2,isClosed?[7,5]:[]);}
  for(const n of D.layout.nodes){const [x,y]=project(n.x,n.y);if(n.type==='road')continue;ctx.fillStyle=n.type==='depot'?'#178967':n.type==='crossing'?'#c08c37':'#3987c9';ctx.beginPath();if(n.type==='depot')ctx.rect(x-5,y-5,10,10);else ctx.arc(x,y,n.type==='crossing'?4:3,0,Math.PI*2);ctx.fill();if(n.type==='service_point')text(n.id.replace('SP_',''),x,y-9);if(n.type==='depot'||n.type==='checkpoint')text(n.label,x,y+(y>height/2?21:-12),'#4d6764',10);}
  for(const c of f.crossings||[]){if(!c.aircraft.length&&!c.waiting_aircraft.length)continue;const [x,y]=project(c.x,c.y);ctx.beginPath();ctx.arc(x,y,Math.max(9,c.radius_m*scale),0,Math.PI*2);ctx.fillStyle=c.aircraft.length?'#df50503d':'#e7ab3940';ctx.fill();ctx.strokeStyle=c.aircraft.length?'#d44848':'#bf8c29';ctx.lineWidth=2;ctx.stroke();text(c.id+(c.aircraft.length?' 飞机通行':' 待清空'),x,y-17,'#a34234',10);}
@@ -93,10 +98,12 @@ function draw(){
  const count=selected?55:8;
  for(const id of selected?[selected]:ids){let previous=null;for(let j=Math.max(0,i-count);j<=i;j++){const v=F[j].vehicles.find(v=>v.id===id);if(!v)continue;const p=project(v.x,v.y);if(previous)line(previous,p,selected?'#2d83ce80':'#839dad35',selected?2:1);previous=p;}}
  const nextVehicles=new Map(next.vehicles.map(v=>[v.id,v]));
- rendered=f.vehicles.map(v=>{const p=position(v,nextVehicles.get(v.id),ratio);return {v,p:project(...p)};});
- for(const {v,p:[x,y]} of rendered){const active=v.id===selected;ctx.beginPath();ctx.arc(x,y,active?7:5,0,Math.PI*2);ctx.fillStyle=active?'#135daa':v.wait_reason||faultStates.has(v.state)?'#df7337':'#247aca';ctx.fill();ctx.strokeStyle='white';ctx.lineWidth=1.5;ctx.stroke();if(active){ctx.beginPath();ctx.arc(x,y,11,0,Math.PI*2);ctx.strokeStyle='#2676bc';ctx.stroke();}}
- const chosen=rendered.find(r=>r.v.id===selected);
- if(chosen){const [x,y]=chosen.p;const lx=Math.max(90,Math.min(width-100,x+110)),ly=Math.max(64,Math.min(height-25,y-38));line([x,y],[lx,ly],'#2676bc',1);ctx.font='12px system-ui';const tw=ctx.measureText(selected).width;ctx.fillStyle='#fffffff5';ctx.fillRect(lx-tw/2-6,ly-15,tw+12,22);text(selected,lx,ly,'#1768b4',12);}
+ rendered=f.vehicles.map(v=>{const p=position(v,nextVehicles.get(v.id),ratio);return {v,key:v.id,p:project(...p)};});
+ const nextAircraft=new Map((next.aircraft||[]).map(a=>[a.id,a]));
+ for(const a of f.aircraft||[]){if(a.state==='scheduled'||a.state==='departed')continue;const p=position(a,nextAircraft.get(a.id),ratio);rendered.push({v:a,key:'air:'+a.id,p:project(...p),aircraft:true});}
+ for(const r of rendered){const {v,p:[x,y]}=r;if(r.aircraft){ctx.save();ctx.translate(x,y);ctx.rotate(-v.heading_deg*Math.PI/180);ctx.beginPath();ctx.moveTo(14,0);ctx.lineTo(1,-3);ctx.lineTo(-4,-12);ctx.lineTo(-7,-12);ctx.lineTo(-5,-2);ctx.lineTo(-11,-4);ctx.lineTo(-11,4);ctx.lineTo(-5,2);ctx.lineTo(-7,12);ctx.lineTo(-4,12);ctx.lineTo(1,3);ctx.closePath();ctx.fillStyle=r.key===selected?'#663aab':'#946bc5';ctx.fill();ctx.strokeStyle='white';ctx.lineWidth=1.5;ctx.stroke();ctx.restore();continue;}const active=v.id===selected;ctx.beginPath();ctx.arc(x,y,active?7:5,0,Math.PI*2);ctx.fillStyle=active?'#135daa':v.wait_reason||faultStates.has(v.state)?'#df7337':'#247aca';ctx.fill();ctx.strokeStyle='white';ctx.lineWidth=1.5;ctx.stroke();if(active){ctx.beginPath();ctx.arc(x,y,11,0,Math.PI*2);ctx.strokeStyle='#2676bc';ctx.stroke();}}
+ const chosen=rendered.find(r=>r.key===selected);
+ if(chosen){const [x,y]=chosen.p;const lx=Math.max(90,Math.min(width-100,x+110)),ly=Math.max(64,Math.min(height-25,y-38));line([x,y],[lx,ly],'#2676bc',1);ctx.font='12px system-ui';const tw=ctx.measureText(chosen.v.id).width;ctx.fillStyle='#fffffff5';ctx.fillRect(lx-tw/2-6,ly-15,tw+12,22);text(chosen.v.id,lx,ly,'#1768b4',12);}
 }
 function setPlaying(value){playing=value;last=performance.now();$('play').textContent=playing?'Ⅱ 暂停':'▶ 播放';}
 $('play').onclick=()=>{if(t>=end)t=begin;setPlaying(!playing);};
@@ -110,7 +117,7 @@ function mouse(e){const r=canvas.getBoundingClientRect();return [e.clientX-r.lef
 function hits(p){return rendered.filter(r=>Math.hypot(r.p[0]-p[0],r.p[1]-p[1])<16);}
 canvas.onpointerdown=e=>{pointer={origin:mouse(e),last:mouse(e),moved:false};canvas.setPointerCapture(e.pointerId);};
 canvas.onpointermove=e=>{const p=mouse(e);if(pointer){const dx=p[0]-pointer.last[0],dy=p[1]-pointer.last[1];if(Math.hypot(p[0]-pointer.origin[0],p[1]-pointer.origin[1])>4)pointer.moved=true;if(pointer.moved){panX+=dx;panY+=dy;}pointer.last=p;tip.style.display='none';return;}const found=hits(p);tip.style.display=found.length?'block':'none';if(found.length){tip.textContent=found.map(({v})=>`${v.id} · ${v.state}\n${v.current_task_id||'无任务'} · ${v.wait_reason||'无等待'}`).join('\n\n');tip.style.left=Math.max(5,Math.min(width-290,p[0]+15))+'px';tip.style.top=Math.max(48,Math.min(height-tip.offsetHeight-5,p[1]+15))+'px';}};
-canvas.onpointerup=e=>{if(pointer&&!pointer.moved){const found=hits(mouse(e));if(found.length){const current=found.findIndex(r=>r.v.id===selected);selected=found[(current+1)%found.length].v.id;$('follow').value=selected;details(F[findFrame(t)]);}}pointer=null;};
+canvas.onpointerup=e=>{if(pointer&&!pointer.moved){const found=hits(mouse(e));if(found.length){const current=found.findIndex(r=>r.key===selected);selected=found[(current+1)%found.length].key;$('follow').value=selected;details(F[findFrame(t)]);}}pointer=null;};
 canvas.onpointercancel=()=>{pointer=null;};canvas.onpointerleave=()=>{tip.style.display='none';};
 canvas.addEventListener('wheel',e=>{e.preventDefault();const [x,y]=mouse(e),old=scale;scale=Math.max(base*.65,Math.min(base*8,scale*Math.exp(-e.deltaY*.001)));panX=x-width/2-(x-width/2-panX)*scale/old;panY=y-height/2-(y-height/2-panY)*scale/old;},{passive:false});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)setPlaying(false);});

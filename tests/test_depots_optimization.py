@@ -231,7 +231,7 @@ def test_config_and_legacy_capacity_migration():
     restored=checkpoint.restore_world(w.layout,payload)
     assert restored.facility_config['D']['capacity']==3
     assert len(restored.berths['D'])==3
-    assert checkpoint.dump_world(restored)['version']==4
+    assert checkpoint.dump_world(restored)['version']==checkpoint.SNAPSHOT_VERSION
 
 
 def test_rolling_replans_at_interval_after_snapshot_and_keeps_running_tasks():

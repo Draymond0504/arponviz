@@ -10,9 +10,9 @@ import json
 from collections import deque
 from datetime import datetime
 
-from .models import Alert, CrossingOccupancy, Flight, Task, Vehicle
+from .models import Aircraft, Alert, CrossingOccupancy, Flight, Task, Vehicle
 
-SNAPSHOT_VERSION = 4
+SNAPSHOT_VERSION = 5
 
 FACILITY_FIELDS = ('facility_config', 'berths', 'berth_reservations', 'depot_queues',
                    'pickup_remaining', 'recovery_detours', 'recovery_route_lock', 'stall_state',
@@ -43,6 +43,9 @@ def dump_world(world) -> dict:
         'tasks': [t.model_dump(mode='json') for t in world.tasks.values()],
         'alerts': [a.model_dump(mode='json') for a in world.alerts.values()],
         'flights': [f.model_dump(mode='json') for f in world.flights.values()],
+        'aircraft': [a.model_dump(mode='json') for a in world.aircraft.values()],
+        'aircraft_taxi_owner': world.aircraft_taxi_owner,
+        'aircraft_layout_fingerprint': hashlib.sha256(json.dumps(world.layout.reference,sort_keys=True).encode()).hexdigest(),
         'occupancies': [r.model_dump(mode='json') for r in world.occupancies.values()],
         'crossing_tokens': world.crossing_tokens,
         'home_node': world.home_node,
@@ -58,10 +61,12 @@ def restore_world(layout, payload):
     from .models import VehicleState
     from .simulator import TRACK_MAXLEN, World
 
-    if payload.get('version') not in (1, 2, 3, SNAPSHOT_VERSION):
+    if payload.get('version') not in (1, 2, 3, 4, SNAPSHOT_VERSION):
         raise ValueError('Unsupported runtime snapshot version; use a separate APRONOPS_DB_PATH.')
     if payload.get('layout_fingerprint') != layout_fingerprint(layout):
         raise ValueError('Road layout differs from saved runtime; use a separate APRONOPS_DB_PATH.')
+    if payload.get('aircraft') and payload.get('aircraft_layout_fingerprint') != hashlib.sha256(json.dumps(layout.reference,sort_keys=True).encode()).hexdigest():
+        raise ValueError('Aircraft layout differs from saved runtime; use a separate APRONOPS_DB_PATH.')
     config = payload.get('facilities', {}).get('facility_config')
     if config is None:
         # Legacy snapshots had no capacity. Preserve every parked vehicle and
@@ -103,6 +108,8 @@ def restore_world(layout, payload):
     world.route_wait = dict(payload['route_wait'])
     world.closures = dict(payload['closures'])
     world.flights = {f['id']: Flight.model_validate(f) for f in payload.get('flights', [])}
+    world.aircraft = {a['id']: Aircraft.model_validate(a) for a in payload.get('aircraft', [])}
+    world.aircraft_taxi_owner = payload.get('aircraft_taxi_owner')
     world.occupancies = {r['id']: CrossingOccupancy.model_validate(r) for r in payload.get('occupancies', [])}
     world.crossing_tokens = dict(payload.get('crossing_tokens', {}))
     if payload['version'] == 1:

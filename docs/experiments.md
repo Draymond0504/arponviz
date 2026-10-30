@@ -2,6 +2,8 @@
 
 第三阶段提供独立的规则仿真实验入口。离线实验与在线现场共用 `simulator.advance` 的运动、任务和穿越互锁逻辑；在线 `tick` 在推进后另行保存数据库。离线不启动 API、不读写现场数据库，不需要 GPU。
 
+新增完整航空器运动、可替换初始车队、45 次配对敏感性实验与看板统计见 [航空器运行与对照实验](aircraft-and-studies.md)。原场景仍可运行；新策略版本为 `rules-v3-aircraft`，比较历史批次时还应核对 manifest 中的源码哈希。
+
 ## 云服务器运行
 
 推荐 Python 3.11/3.12。在独立平台仓库运行：
@@ -47,7 +49,7 @@ python -m apronops.experiments.run \
 
 预测策略只用已公布的预测窗口和当前已授予的占用信息，不读取未来申请窗口或未来故障。预测只影响规划，实际停车仍由统一互锁决定。预计完成时间包含当前基地队列、办理和服务时长，但没有完整模拟加减速与沿路前车排队。基地预留和恢复是所有策略共用的约束，预测规则不能保证比最近车辆规则更好。
 
-当前策略版本为 `rules-v2-depots`，新增 `rolling_optimization`、基地容量和排队预测，详见 [基地与滚动优化](depots-and-optimization.md)。未接入学习策略。
+当前策略版本为 `rules-v3-aircraft`，新增 `rolling_optimization`、基地容量和排队预测，详见 [基地与滚动优化](depots-and-optimization.md)。未接入学习策略。
 
 ## 输出与指标
 

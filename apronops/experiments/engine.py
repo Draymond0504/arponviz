@@ -6,9 +6,9 @@ import hashlib
 import json
 import math
 
-from .. import crossings, facilities, flights, simulator
+from .. import aircraft, crossings, facilities, flights, simulator
 from ..checkpoint import dump_world
-from ..models import CrossingOccupancy, Flight, Task, TaskStatus, TaskType, VehicleState
+from ..models import Aircraft, CrossingOccupancy, Flight, Task, TaskStatus, TaskType, VehicleState
 from ..policies import POLICIES
 from .scenario import Scenario, realize
 
@@ -25,11 +25,10 @@ class Simulation:
         self.reset()
 
     def reset(self):
-        self.world = simulator.load_world(self.data_dir, now=self.scenario.start_time, seed=self.seed)
+        self.world = simulator.load_world(self.data_dir, now=self.scenario.start_time, seed=self.seed,
+            vehicle_seed=[v.model_dump() for v in self.scenario.vehicles] if self.scenario.vehicles is not None else None,
+            depot_overrides={k:v.model_dump() for k,v in self.scenario.depots.items()})
         self.world.tasks.clear()  # Experiments never inherit live seed work or DB state.
-        if self.scenario.depots:
-            facilities.initialize(self.world, {**self.world.facility_config,
-                **{k:v.model_dump() for k,v in self.scenario.depots.items()}})
         self.world.policy_name = self.policy
         self.events = realize(self.scenario, self.seed)
         self.cursor = 0
@@ -62,6 +61,16 @@ class Simulation:
         for f in self.scenario.flights:
             if f.stand_id not in layout.nodes or layout.nodes[f.stand_id].type != 'service_point':
                 raise ValueError(f'unknown stand {f.stand_id}')
+        for a in self.scenario.aircraft:
+            g=aircraft.graph(self.world)
+            if a.entry_node not in g.nodes or g.nodes[a.entry_node].type!='entry':
+                raise ValueError('invalid aircraft entry')
+            if a.exit_node not in g.nodes or g.nodes[a.exit_node].type!='exit':
+                raise ValueError('invalid aircraft exit')
+            flight=next(f for f in self.scenario.flights if f.id==a.flight_id)
+            stand=str(int(flight.stand_id.removeprefix('SP_'))-1)
+            g.shortest_path(a.entry_node,stand)
+            g.shortest_path(stand,a.exit_node)
         flight_task_ids = {f'FLIGHT:{f.id}:{kind}' for f in self.scenario.flights for kind in ('baggage','catering','inspection')}
         for t in self.scenario.tasks:
             if t.id in flight_task_ids:
@@ -79,6 +88,9 @@ class Simulation:
             if kind == 'flight':
                 flights.upsert_flight(world, Flight(id=eid, stand_id=p['stand_id'], arrival_at=date(p['arrival_s']),
                                                   departure_at=date(p['arrival_s']+p['turnaround_s'])))
+            elif kind == 'flight_aircraft':
+                aircraft.register(world, Aircraft(**{k:v for k,v in p.items() if k!='taxi_start_s'},
+                    taxi_start_at=date(p['taxi_start_s'])))
             elif kind == 'task':
                 world.tasks[eid] = Task(id=eid, type=TaskType(p['type']), origin=p['origin'], destination=p['destination'],
                     priority=p['priority'], created_at=world.now, release_at=date(p['release_s']),
@@ -141,6 +153,7 @@ class Simulation:
     def observe(self):
         w = self.world
         return {'elapsed_s': self.elapsed_s, 'simulation_time': w.now.isoformat(),
+                'aircraft':aircraft.rows(w),
                 'depots':facilities.rows(w), 'recovery':dict(w.recovery_counts),
                 'wait_for':{k:list(v) for k,v in w.wait_for.items()}, 'deadlock_cycles':[list(c) for c in w.deadlock_cycles],
                 'vehicles': [{**v.model_dump(mode='json'), 'wait_reason': w.route_wait.get(v.id, ''),
@@ -177,4 +190,10 @@ class Simulation:
                 'rolling_epochs':w.dispatch_stats['epochs'],
                 'conflict_zone_violation_steps': self.violation_steps,
                 'aircraft_grant_delay_s': sum((r.actual_start-r.requested_start).total_seconds() for r in granted),
-                'aircraft_ungranted_requests': sum(r.requested_start <= w.now and r.actual_start is None for r in w.occupancies.values())}
+                'aircraft_ungranted_requests': sum(r.requested_start <= w.now and r.actual_start is None for r in w.occupancies.values()),
+                'aircraft_total':len(w.aircraft),
+                'aircraft_arrived':sum(a.actual_arrival_at is not None for a in w.aircraft.values()),
+                'aircraft_departed':sum(a.state=='departed' for a in w.aircraft.values()),
+                'aircraft_wait_s':sum(a.wait_s for a in w.aircraft.values()),
+                'aircraft_distance_m':sum(a.distance_m for a in w.aircraft.values()),
+                'aircraft_departure_delay_lower_bound_s':sum(max(0.,((a.actual_departure_at or w.now)-w.flights[a.flight_id].departure_at).total_seconds()) for a in w.aircraft.values())}

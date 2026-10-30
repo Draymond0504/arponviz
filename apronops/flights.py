@@ -15,6 +15,8 @@ def upsert_flight(world, flight: Flight, expected_revision: int | None = None) -
     if node is None or node.type != 'service_point':
         raise ValueError('航班机位必须是有效的机位服务点')
     old = world.flights.get(flight.id)
+    if old and old.stand_id != flight.stand_id and any(a.flight_id==flight.id for a in world.aircraft.values()):
+        raise ValueError('已关联航空器，不能直接更换机位')
     if old:
         if (old.stand_id, old.arrival_at, old.departure_at) == (flight.stand_id, flight.arrival_at, flight.departure_at):
             return old
@@ -78,7 +80,14 @@ def flight_rows(world):
         status = ('保障完成' if tasks and completed == len(tasks) else
                   '保障逾期' if world.now >= flight.departure_at else
                   '等待到位' if world.now < flight.arrival_at else '保障中')
+        plane = next((a for a in world.aircraft.values() if a.flight_id==flight.id),None)
+        if plane:
+            status = {'scheduled':'等待航空器进场','taxi_in':'进场滑行','parked':status,
+                      'taxi_out':'离位滑行','departed':'已离场'}[plane.state]
         rows.append({**flight.model_dump(mode='json'), 'status': status,
+                     'aircraft_id':plane.id if plane else None,
+                     'actual_arrival_at':plane.actual_arrival_at.isoformat() if plane and plane.actual_arrival_at else None,
+                     'actual_departure_at':plane.actual_departure_at.isoformat() if plane and plane.actual_departure_at else None,
                      'completed_tasks': completed, 'total_tasks': len(tasks)})
     return rows
 
@@ -99,4 +108,16 @@ def load_demo(world):
                           aircraft_id='DEMO_TAXI_01', predicted_start=start,
                           predicted_end=start+timedelta(seconds=60), requested_start=start+timedelta(seconds=20),
                           requested_end=start+timedelta(seconds=80)))
+    return flight
+
+
+def load_aircraft_demo(world):
+    from .aircraft import register
+    from .models import Aircraft
+    fid='DEMO_AIRCRAFT_01'
+    if fid in world.flights:
+        return world.flights[fid]
+    flight=upsert_flight(world,Flight(id=fid,stand_id='SP_07',arrival_at=world.now+timedelta(seconds=120),
+                                    departure_at=world.now+timedelta(minutes=45)))
+    register(world,Aircraft(id='DEMO_AC_01',flight_id=fid,taxi_start_at=world.now+timedelta(seconds=10)))
     return flight
