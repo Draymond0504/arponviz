@@ -143,3 +143,17 @@ def test_experiment_replay_scrub_without_live_api(tmp_path, monkeypatch):
     app.run()
     assert not app.exception
     assert app.error
+
+
+def test_policy_form_and_depot_capacity_display(client):
+    app=AppTest.from_file(APP,default_timeout=20).run()
+    assert_clean(app)
+    assert any(h.value=='基地泊位与入口排队' for h in app.subheader)
+    selector=next(s for s in app.selectbox if s.label=='规则策略')
+    selector.select('rolling_optimization').run()
+    button(app,'应用调度策略').click().run()
+    assert_clean(app)
+    assert client.get('/state').json()['policy']=='rolling_optimization'
+    assert client.get('/dispatch/policies').json()['current']=='rolling_optimization'
+    assert client.post('/dispatch/policy',params={'policy':'invalid'}).status_code==400
+    assert len(client.get('/state').json()['depots'])==5

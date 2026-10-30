@@ -10,7 +10,7 @@ from datetime import timedelta
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
-from .. import crossings, flights, metrics, scheduler, simulator
+from .. import crossings, facilities, flights, metrics, policies, scheduler, simulator
 from ..models import CrossingOccupancy, Flight, Task, TaskType
 from ..checkpoint import load_or_create_world
 from ..storage import init_db
@@ -291,13 +291,17 @@ def get_state():
         return {
             "revision": _world.revision, "simulation_time": _world.now.isoformat(),
             "runtime_error": _runtime_error,
-            "vehicles": [{**v.model_dump(), "wait_reason": _world.route_wait.get(v.id, "")}
+            "vehicles": [{**v.model_dump(), "wait_reason": _world.route_wait.get(v.id, ""),
+                          "recovery_action":facilities.recovery_action(_world,v.id)}
                          for v in _world.vehicles.values()],
             "tasks": [{**t.model_dump(), "wait_reason": scheduler.task_wait_reason(t, _world.tasks, _world.now)}
                       for t in _world.tasks.values()],
             "flights": flights.flight_rows(_world),
             "occupancies": [r.model_dump() for r in _world.occupancies.values()],
             "crossings": crossings.crossing_rows(_world),
+            "depots": facilities.rows(_world), "recovery": dict(_world.recovery_counts),
+            "policy": _world.policy_name, "dispatch": dict(_world.dispatch_stats),
+            "wait_for": copy.deepcopy(_world.wait_for), "deadlock_cycles": copy.deepcopy(_world.deadlock_cycles),
             "alerts": [a.model_dump() for a in _world.alerts.values()],
             "closures": list(_world.closures.values()),
             "tracks": {vid: [{"t": t.isoformat(), "x": x, "y": y} for t, x, y in points]
@@ -309,6 +313,23 @@ def get_state():
 def list_closures():
     with _lock:
         return list(_world.closures.values())
+
+
+@app.get('/dispatch/policies')
+def list_policies():
+    with _lock:
+        return {'current':_world.policy_name, 'options':policies.POLICIES}
+
+
+@app.post('/dispatch/policy')
+def set_policy(policy: str):
+    if policy not in policies.POLICIES:
+        raise HTTPException(status_code=400, detail='未知调度策略')
+    with _mutation():
+        _world.policy_name = policy
+        _world.next_dispatch_at = None
+        simulator.record_event(_world,'policy_changed','operator',policy=policy)
+        return {'policy':policy}
 
 
 @app.post("/roads/closures")

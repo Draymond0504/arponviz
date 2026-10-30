@@ -152,19 +152,13 @@ def test_snapshot_preserves_seed_counter_distance_and_continuation():
     assert migrated.vehicles.keys() == world.vehicles.keys()
 
 
-def test_stationary_blocker_explains_unfinished_forecast_task():
+def test_parked_depot_resident_no_longer_blocks_forecast_pickup():
     scene = read_scenario(ROOT/'configs/experiments/routing.yaml')
     sim = Simulation(scene, 1, 'deadline_forecast')
     sim.step(1800)
-    vehicle = sim.world.vehicles['SHUTTLE_01']
-    assert vehicle.next_node_id == 'DEPOT_AMR'
-    assert '前方车辆' in sim.world.route_wait[vehicle.id]
-    assert sim.summary()['unfinished_tasks'] == 1
-    assert sim.summary()['traffic_wait_s'] > 1000
-    # Repairing the actual blockage, without changing the policy, allows pickup.
-    sim.world.vehicles.pop('AMR_INSPECT_01')
-    simulator.advance(sim.world, 15)
-    assert sim.world.tasks['INSPECT_NORTH'].started_at is not None
+    assert sim.world.tasks['INSPECT_NORTH'].completed_at is not None
+    assert sim.summary()['unfinished_tasks'] == 0
+    assert sim.summary()['conflict_zone_violation_steps'] == 0
 
 
 def test_fault_time_is_not_counted_as_route_wait():

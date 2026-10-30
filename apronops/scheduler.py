@@ -17,7 +17,7 @@ TASK_VEHICLE_COMPAT = {
 def _compatible_idle_vehicles(task: Task, vehicles: list[Vehicle]) -> list[Vehicle]:
     allowed_types = TASK_VEHICLE_COMPAT.get(task.type.value, set())
     return [v for v in vehicles if v.type.value in allowed_types and v.state == VehicleState.IDLE
-            and v.current_task_id is None and v.next_node_id is None]
+            and v.current_task_id is None and v.next_node_id is None and v.target_node_id is None]
 
 
 def assign_nearest(task: Task, vehicles: list[Vehicle], layout: Layout) -> Optional[Vehicle]:

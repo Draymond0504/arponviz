@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 
-from .. import crossings, flights, simulator
+from .. import crossings, facilities, flights, simulator
 from ..checkpoint import dump_world
 from ..models import CrossingOccupancy, Flight, Task, TaskStatus, TaskType, VehicleState
 from ..policies import POLICIES
@@ -27,6 +27,9 @@ class Simulation:
     def reset(self):
         self.world = simulator.load_world(self.data_dir, now=self.scenario.start_time, seed=self.seed)
         self.world.tasks.clear()  # Experiments never inherit live seed work or DB state.
+        if self.scenario.depots:
+            facilities.initialize(self.world, {**self.world.facility_config,
+                **{k:v.model_dump() for k,v in self.scenario.depots.items()}})
         self.world.policy_name = self.policy
         self.events = realize(self.scenario, self.seed)
         self.cursor = 0
@@ -35,6 +38,7 @@ class Simulation:
         self.route_wait_s = 0.
         self.traffic_wait_s = 0.
         self.violation_steps = 0
+        self.capacity_violation_steps = 0
         self.elapsed_s = 0.
         self._validate_references()
         # Exclude the policy from input hash, allowing paired-policy verification.
@@ -98,6 +102,10 @@ class Simulation:
         crossings.update_crossings(world)
 
     def _observe_step(self, world, dt):
+        for nid, config in world.facility_config.items():
+            slots = list(world.berths[nid].values())+list(world.berth_reservations[nid].values())
+            if len(slots) > config['capacity'] or len(set(slots)) != len(slots):
+                self.capacity_violation_steps += 1
         for vid, reason in world.route_wait.items():
             if world.vehicles[vid].state not in (VehicleState.EN_ROUTE, VehicleState.OPERATING, VehicleState.RETURNING):
                 continue  # A stale route reason during a fault is not route waiting.
@@ -133,7 +141,10 @@ class Simulation:
     def observe(self):
         w = self.world
         return {'elapsed_s': self.elapsed_s, 'simulation_time': w.now.isoformat(),
-                'vehicles': [{**v.model_dump(mode='json'), 'wait_reason': w.route_wait.get(v.id, '')} for v in w.vehicles.values()],
+                'depots':facilities.rows(w), 'recovery':dict(w.recovery_counts),
+                'wait_for':{k:list(v) for k,v in w.wait_for.items()}, 'deadlock_cycles':[list(c) for c in w.deadlock_cycles],
+                'vehicles': [{**v.model_dump(mode='json'), 'wait_reason': w.route_wait.get(v.id, ''),
+                             'recovery_action':facilities.recovery_action(w,v.id)} for v in w.vehicles.values()],
                 'tasks': [{k: t.model_dump(mode='json')[k] for k in ('id','flight_id','type','status','assigned_vehicle_id','origin','destination','deadline','completed_at')}
                           for t in w.tasks.values()],
                 'crossings': crossings.crossing_rows(w), 'closures': [dict(c) for c in w.closures.values()]}
@@ -158,6 +169,12 @@ class Simulation:
                 'distance_m': sum(w.distance_m.values()), 'empty_distance_m': sum(w.empty_distance_m.values()),
                 'crossing_wait_s': self.crossing_wait_s, 'route_wait_s': self.route_wait_s,
                 'traffic_wait_s': self.traffic_wait_s,
+                'depot_wait_s':w.depot_wait_s, 'deadlocks_detected':w.recovery_counts['detected'],
+                'deadlocks_resolved':w.recovery_counts['resolved'], 'deadlocks_unresolved':w.recovery_counts['unresolved'],
+                'depot_deadlock_cycles':w.recovery_counts['cycles'],
+                'depot_capacity_violation_steps':self.capacity_violation_steps,
+                'recovery_relocations':w.recovery_counts['relocations'], 'recovery_reroutes':w.recovery_counts['rerouted'],
+                'rolling_epochs':w.dispatch_stats['epochs'],
                 'conflict_zone_violation_steps': self.violation_steps,
                 'aircraft_grant_delay_s': sum((r.actual_start-r.requested_start).total_seconds() for r in granted),
                 'aircraft_ungranted_requests': sum(r.requested_start <= w.now and r.actual_start is None for r in w.occupancies.values())}

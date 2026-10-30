@@ -1,0 +1,8 @@
+# Logical off-road bays; entry queues wait in a logical holding pocket.
+# Positions remain graph coordinates; these are synthetic capacity assumptions.
+depots:
+  DEPOT_BAG_W: {capacity: 2, pickup_s: 10, recovery_after_s: 30}
+  DEPOT_BAG_E: {capacity: 2, pickup_s: 10, recovery_after_s: 30}
+  DEPOT_BUS: {capacity: 2, pickup_s: 10, recovery_after_s: 30}
+  DEPOT_CATER: {capacity: 2, pickup_s: 15, recovery_after_s: 30}
+  DEPOT_AMR: {capacity: 2, pickup_s: 5, recovery_after_s: 30}

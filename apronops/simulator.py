@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from . import anomaly, crossings, kinematics, policies, scheduler
+from . import anomaly, crossings, facilities, kinematics, policies, recovery, scheduler
 from .layout import Layout, load_layout
 from .models import (
     Alert,
@@ -37,7 +37,7 @@ TRACK_MAXLEN = 80  # 每辆车保留的轨迹点数（内存环形缓冲，不�
 
 
 class World:
-    def __init__(self, layout: Layout, vehicles: dict[str, Vehicle], tasks: dict[str, Task], *, now=None, seed=None):
+    def __init__(self, layout: Layout, vehicles: dict[str, Vehicle], tasks: dict[str, Task], *, now=None, seed=None, depot_config=None):
         self.layout = layout
         self.vehicles = vehicles
         self.tasks = tasks
@@ -64,6 +64,7 @@ class World:
         self.tracks: dict[str, deque[tuple[datetime, float, float]]] = {
             v.id: deque([(self.now, v.x, v.y)], maxlen=TRACK_MAXLEN) for v in vehicles.values()
         }
+        facilities.initialize(self, depot_config)
 
     def new_id(self):
         self.id_counter += 1
@@ -105,7 +106,9 @@ def load_world(data_dir: Path | str = DATA_DIR, *, now=None, seed=None) -> World
             created_at=now,
         )
 
-    return World(layout, vehicles, tasks, now=now, seed=seed)
+    depot_file = data_dir / 'depots.yaml'
+    config = yaml.safe_load(depot_file.read_text(encoding='utf-8'))['depots'] if depot_file.exists() else None
+    return World(layout, vehicles, tasks, now=now, seed=seed, depot_config=config)
 
 
 def inject_anomaly(world: World, anomaly_type: str, vehicle_id: str) -> Event:
@@ -174,6 +177,9 @@ def _raise_alert(world: World, event: Event) -> Alert:
                 vehicle.current_task_id = None
                 vehicle.task_phase = "returning"
                 vehicle.target_node_id = world.home_node[vehicle.id]
+                if vehicle.id in world.recovery_detours:
+                    world.recovery_detours[vehicle.id]['target'] = vehicle.target_node_id
+                    vehicle.target_node_id = world.recovery_detours[vehicle.id]['to']
                 vehicle.planned_path = []
                 world.suspended_state[vehicle.id] = VehicleState.RETURNING
     return alert
@@ -287,6 +293,8 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
             vehicle.edge_progress_m = 0.0
             vehicle.current_speed_mps = 0.0
             vehicle.planned_path = []
+            facilities.arrive(world, vehicle)
+            _set_route_wait(world, vehicle, None)
             return True
 
         if vehicle.next_node_id is not None and layout.is_blocked(vehicle.node_id, vehicle.next_node_id):
@@ -300,7 +308,7 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
         if vehicle.next_node_id is None:
             if (not vehicle.planned_path or vehicle.planned_path[0] != vehicle.node_id
                     or vehicle.planned_path[-1] != vehicle.target_node_id
-                    or world.policy_name == 'deadline_forecast'
+                    or (world.policy_name != 'priority_distance' and not world.recovery_route_lock.get(vehicle.id))
                     or any(layout.is_blocked(a, b) for a, b in zip(vehicle.planned_path, vehicle.planned_path[1:]))):
                 try:
                     vehicle.planned_path = policies.route(world, vehicle, vehicle.node_id, vehicle.target_node_id)
@@ -318,6 +326,9 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
                 vehicle.planned_path = [vehicle.node_id] + policies.route(world, vehicle, vehicle.next_node_id, vehicle.target_node_id)
             except ValueError:
                 vehicle.planned_path = [vehicle.node_id, vehicle.next_node_id]
+        if vehicle.edge_progress_m <= 1e-9 and not facilities.admit(world, vehicle, vehicle.next_node_id):
+            _set_route_wait(world, vehicle, '基地泊位已满或等待先到车辆，入口等候区排队')
+            return False
         step = min(remaining_dt, kinematics.PHYSICS_SUBSTEP_S)
         remaining_dt -= step
 
@@ -366,9 +377,11 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
             world.crossing_tokens[crossing_id] = vehicle.id
 
         vehicle.current_speed_mps = new_speed
+        if travel > 0:
+            facilities.depart(world, vehicle)
         vehicle.edge_progress_m += travel
         world.distance_m[vehicle.id] = world.distance_m.get(vehicle.id, 0.) + travel
-        if vehicle.task_phase in ('to_origin', 'returning'):
+        if vehicle.task_phase in ('to_origin', 'returning') or (vehicle.id in world.recovery_detours and vehicle.current_task_id is None):
             world.empty_distance_m[vehicle.id] = world.empty_distance_m.get(vehicle.id, 0.) + travel
         vehicle.battery = max(0.0, vehicle.battery - travel * BATTERY_DRAIN_PER_M)
         ax, ay = layout.node_xy(vehicle.node_id)
@@ -383,6 +396,7 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
             vehicle.edge_progress_m = 0.0
             if len(vehicle.planned_path) > 1:
                 vehicle.planned_path = vehicle.planned_path[1:]
+            world.recovery_route_lock.pop(vehicle.id, None)
 
         if new_speed <= 1e-9 and travel <= 1e-9:
             # 被让行/跟车逼停在原地，本次 tick 不再继续推进子步，避免死循环消耗 remaining_dt
@@ -395,6 +409,8 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
         vehicle.edge_progress_m = 0.0
         vehicle.current_speed_mps = 0.0
         vehicle.planned_path = []
+        facilities.arrive(world, vehicle)
+        _set_route_wait(world, vehicle, None)
         return True
     return False
 
@@ -405,8 +421,19 @@ def _advance_vehicle(world: World, vehicle: Vehicle, dt: float, now: datetime) -
         return
     vehicle.last_heartbeat = now
 
+    if vehicle.id in world.recovery_detours:
+        if _move_along_path(world, vehicle, dt):
+            detour = world.recovery_detours.pop(vehicle.id)
+            vehicle.target_node_id = detour['target']
+            vehicle.planned_path = []
+            record_event(world, 'deadlock_relocation_arrived', vehicle.id, vehicle.current_task_id,
+                         from_depot=detour['from'], to_depot=detour['to'], event_time=now)
+        return
+
     if vehicle.state == VehicleState.EN_ROUTE and vehicle.task_phase == "to_origin":
         if _move_along_path(world, vehicle, dt):
+            if not facilities.pickup_ready(world, vehicle, dt):
+                return
             task = world.tasks[vehicle.current_task_id]
             vehicle.state = transition_vehicle(vehicle.state, VehicleState.OPERATING)
             task.status = transition_task(task.status, TaskStatus.IN_PROGRESS)
@@ -494,23 +521,25 @@ def advance(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0, obs
         raise ValueError("dt must be finite and positive")
     end = world.now + timedelta(seconds=dt)
     while world.now < end:
+        facilities.cleanup(world)
         crossings.update_crossings(world)
-        for task in policies.task_order(world):
-            vehicle = policies.select_vehicle(world, task)
-            if vehicle:
-                _start_assignment(world, vehicle, task, world.now)
+        for task, vehicle in policies.assignments(world):
+            _start_assignment(world, vehicle, task, world.now)
         # Advance every vehicle on the same clock. Split also at externally
         # requested occupancy and release times, so a window cannot be skipped.
         step_end = min(end, world.now + timedelta(seconds=kinematics.PHYSICS_SUBSTEP_S))
         boundaries = [r.requested_start for r in world.occupancies.values() if r.status == 'scheduled']
         boundaries += [r.actual_end for r in world.occupancies.values() if r.status == 'active']
         boundaries += [t.release_at for t in world.tasks.values() if t.release_at is not None]
+        if world.policy_name == 'rolling_optimization' and world.next_dispatch_at:
+            boundaries.append(world.next_dispatch_at)
         step_end = min([step_end] + [t for t in boundaries if world.now < t < step_end])
         step = (step_end - world.now).total_seconds()
         for vehicle in world.vehicles.values():
             _advance_vehicle(world, vehicle, step, step_end)
         world.now = step_end
         crossings.update_crossings(world)
+        recovery.update(world, step)
         if observer:
             observer(world, step)
     crossings.update_crossings(world)

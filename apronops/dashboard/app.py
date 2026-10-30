@@ -251,11 +251,34 @@ def live_overview(layout_data, highlight_ids, show_aircraft, route_endpoints):
                                         show_aircraft, route), use_container_width=True, key="live_map")
     st.subheader("车辆状态")
     if vehicles:
-        df = pd.DataFrame(vehicles)[["id", "type", "state", "task_phase", "current_speed_mps", "battery", "current_task_id", "wait_reason"]]
+        df = pd.DataFrame(vehicles).reindex(columns=["id", "type", "state", "task_phase", "current_speed_mps", "battery", "current_task_id", "wait_reason", "recovery_action"])
         st.dataframe(df.rename(columns={"current_speed_mps": "速度(m/s)", "task_phase": "任务阶段", "wait_reason": "等待原因"}), use_container_width=True)
     st.subheader("任务列表")
     if tasks:
         st.dataframe(pd.DataFrame(tasks)[["id", "flight_id", "type", "status", "release_at", "deadline", "depends_on", "assigned_vehicle_id", "wait_reason"]], use_container_width=True)
+    depot_panel(state)
+
+
+def depot_panel(state):
+    if state.get('depots'):
+        st.subheader('基地泊位与入口排队')
+        st.caption('泊位和入口等候区是逻辑容量资源；预计等待为空表示尚无确定的释放时间。')
+        columns = ['id','capacity','occupied','reserved','queue_length','predicted_wait_s']
+        st.dataframe(pd.DataFrame(state['depots'])[columns].rename(columns={
+            'id':'基地','capacity':'泊位数','occupied':'已占用','reserved':'进站预留',
+            'queue_length':'排队车辆','predicted_wait_s':'预计等待(秒)'}),use_container_width=True)
+        with st.expander('泊位与排队明细'):
+            st.json(state['depots'])
+    if state.get('recovery'):
+        r = state['recovery']
+        a,b,c = st.columns(3)
+        a.metric('持续阻塞已解除',r['resolved'])
+        b.metric('挪车恢复已发起',r['relocations'])
+        c.metric('持续阻塞未解除',r['unresolved'])
+        if r['unresolved']:
+            st.warning('存在持续阻塞，自动恢复不可用或仍在执行。请结合车辆等待原因、故障和事件记录处置。')
+        if state.get('deadlock_cycles'):
+            st.error('检测到基地资源循环等待：'+str(state['deadlock_cycles']))
 
 
 @st.fragment(run_every=2)
@@ -344,6 +367,19 @@ if page == "运行总览":
     node_labels = {n["id"]: f'{n["label"]}（{n["id"]}）' for n in nodes}
     highlight_ids = st.multiselect("高亮车辆轨迹（最多 3 辆）", sorted(v["id"] for v in initial_state["vehicles"]), max_selections=3)
     show_aircraft = st.checkbox("叠加飞机滑行道参照", value=False)
+    with st.expander('调度策略'):
+        options = {'priority_distance':'优先级与最近车辆', 'deadline_forecast':'截止时间与排队预测',
+                   'rolling_optimization':'滚动联合优化（每 15 秒）'}
+        with st.form('dispatch_policy'):
+            selected_policy = st.selectbox('规则策略',list(options),
+                index=list(options).index(initial_state.get('policy','priority_distance')),format_func=options.get)
+            st.caption('策略切换影响后续分配与节点寻路；正在执行的任务继续保留。')
+            if st.form_submit_button('应用调度策略'):
+                try:
+                    api_post('/dispatch/policy',policy=selected_policy)
+                    st.success('调度策略已保存')
+                except requests.RequestException as error:
+                    st.error(error_text(error))
     route_endpoints = None
     with st.expander("查看起终点行车路线"):
         enabled = st.checkbox("在图中显示路线", value=False)
@@ -513,8 +549,9 @@ elif page == "实验回放":
             st.subheader("当前帧任务")
             st.dataframe(pd.DataFrame(frame['tasks']), use_container_width=True)
             st.subheader("当前帧车辆")
-            st.dataframe(pd.DataFrame([{k: v.get(k) for k in ('id','state','current_task_id','current_speed_mps','wait_reason')}
+            st.dataframe(pd.DataFrame([{k: v.get(k) for k in ('id','state','current_task_id','current_speed_mps','wait_reason','recovery_action')}
                                        for v in frame['vehicles']]), use_container_width=True)
+            depot_panel(frame)
             st.subheader("整次实验汇总（截至运行停止）")
             st.json(data['summary'])
             st.caption("未完成任务保留在完成率分母；延误下界包含未完成任务截至停止时刻的延误。回放轨迹按采样帧显示。")

@@ -51,8 +51,11 @@ def sense_ahead_gap(world: "World", vehicle: Vehicle) -> float | None:
         return None
     layout = world.layout
     gaps: list[float] = []
+    from .facilities import off_road
     for other in world.vehicles.values():
         if other.id == vehicle.id:
+            continue
+        if off_road(world, other):
             continue
         # 对头：对方从本车的目标节点驶来，且终点正是本车所在节点
         if other.node_id == vehicle.next_node_id and other.next_node_id == vehicle.node_id:

@@ -71,6 +71,12 @@ class TaskSpec(Spec):
     priority: int = Field(default=3, ge=1, le=5)
 
 
+class DepotSpec(Spec):
+    capacity: int = Field(default=2, ge=1, le=100, strict=True)
+    pickup_s: float = Field(default=10, gt=0)
+    recovery_after_s: float = Field(default=30, gt=0)
+
+
 class Scenario(Spec):
     schema_version: Literal[1] = 1
     id: str = Field(pattern=r'^[A-Za-z0-9_-]+$')
@@ -84,6 +90,7 @@ class Scenario(Spec):
     closures: list[ClosureSpec] = Field(default_factory=list)
     faults: list[FaultSpec] = Field(default_factory=list)
     tasks: list[TaskSpec] = Field(default_factory=list)
+    depots: dict[str, DepotSpec] = Field(default_factory=dict)
 
     @field_validator('start_time')
     @classmethod

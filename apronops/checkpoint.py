@@ -12,7 +12,12 @@ from datetime import datetime
 
 from .models import Alert, CrossingOccupancy, Flight, Task, Vehicle
 
-SNAPSHOT_VERSION = 3
+SNAPSHOT_VERSION = 4
+
+FACILITY_FIELDS = ('facility_config', 'berths', 'berth_reservations', 'depot_queues',
+                   'pickup_remaining', 'recovery_detours', 'recovery_route_lock', 'stall_state',
+                   'recovery_counts', 'depot_wait_s', 'dispatch_stats')
+FACILITY_FIELDS += ('wait_for', 'deadlock_cycles')
 
 
 def layout_fingerprint(layout) -> str:
@@ -27,6 +32,8 @@ def layout_fingerprint(layout) -> str:
 
 def dump_world(world) -> dict:
     return {
+        'facilities': json.loads(json.dumps({k:getattr(world,k) for k in FACILITY_FIELDS})),
+        'next_dispatch_at': world.next_dispatch_at.isoformat() if world.next_dispatch_at else None,
         'version': SNAPSHOT_VERSION,
         'layout_fingerprint': layout_fingerprint(world.layout),
         'now': world.now.isoformat(), 'revision': world.revision,
@@ -51,12 +58,22 @@ def restore_world(layout, payload):
     from .models import VehicleState
     from .simulator import TRACK_MAXLEN, World
 
-    if payload.get('version') not in (1, 2, SNAPSHOT_VERSION):
+    if payload.get('version') not in (1, 2, 3, SNAPSHOT_VERSION):
         raise ValueError('Unsupported runtime snapshot version; use a separate APRONOPS_DB_PATH.')
     if payload.get('layout_fingerprint') != layout_fingerprint(layout):
         raise ValueError('Road layout differs from saved runtime; use a separate APRONOPS_DB_PATH.')
+    config = payload.get('facilities', {}).get('facility_config')
+    if config is None:
+        # Legacy snapshots had no capacity. Preserve every parked vehicle and
+        # record the inferred capacity rather than discarding an old resident.
+        from .facilities import DEFAULT
+        config = {nid:{**DEFAULT,'capacity':max(DEFAULT['capacity'],sum(
+            (v['node_id']==nid and v.get('edge_progress_m',0)<=1e-9)
+            or (v.get('next_node_id')==nid and v.get('edge_progress_m',0)>1e-9)
+            for v in payload['vehicles']))}
+            for nid,n in layout.nodes.items() if n.type == 'depot'}
     world = World(layout, {v['id']: Vehicle.model_validate(v) for v in payload['vehicles']},
-                  {t['id']: Task.model_validate(t) for t in payload['tasks']})
+                  {t['id']: Task.model_validate(t) for t in payload['tasks']}, depot_config=config)
     world.now = datetime.fromisoformat(payload['now'])
     world.revision = payload['revision']
     world.seed = payload.get('seed')
@@ -66,6 +83,18 @@ def restore_world(layout, payload):
         world.rng.setstate(tuplify(payload['rng_state']))
     world.id_counter = payload.get('id_counter', 0)
     world.policy_name = payload.get('policy_name', 'priority_distance')
+    if 'facilities' in payload:
+        for key in FACILITY_FIELDS:
+            setattr(world,key,json.loads(json.dumps(payload['facilities'][key])))
+    else:
+        from .facilities import free_slot
+        # Legacy inbound cars already crossed the new admission point. Reserve
+        # their destination without rewinding their physical edge progress.
+        for v in world.vehicles.values():
+            if v.next_node_id in world.berths and v.edge_progress_m > 1e-9:
+                world.berth_reservations[v.next_node_id][v.id] = free_slot(world,v.next_node_id)
+    if payload.get('next_dispatch_at'):
+        world.next_dispatch_at = datetime.fromisoformat(payload['next_dispatch_at'])
     world.distance_m = dict(payload.get('distance_m', world.distance_m))
     world.empty_distance_m = dict(payload.get('empty_distance_m', world.empty_distance_m))
     world.alerts = {a['id']: Alert.model_validate(a) for a in payload['alerts']}

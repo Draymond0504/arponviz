@@ -1,0 +1,31 @@
+schema_version: 1
+id: depot_pressure
+start_time: '2026-01-01T00:00:00Z'
+description: '单泊位巡检基地先有故障驻车；来车排队，修复后触发挪车，再释放第二项巡检。'
+horizon_s: 1800
+step_s: 0.5
+sample_s: 5
+depots:
+  DEPOT_AMR: {capacity: 1, pickup_s: 15, recovery_after_s: 30}
+tasks:
+  - id: NORTH_CHECK
+    type: inspection
+    origin: DEPOT_AMR
+    destination: CHECK_N
+    deadline_s: 700
+    priority: 5
+    service_duration_s: 60
+  - id: EAST_CHECK
+    type: inspection
+    origin: DEPOT_AMR
+    destination: SP_20
+    release_s: 900
+    deadline_s: 1700
+    priority: 3
+    service_duration_s: 60
+faults:
+  - id: RESIDENT_SIGNAL
+    start_s: 0
+    end_s: 300
+    vehicle_id: AMR_INSPECT_01
+    anomaly_type: communication_lost

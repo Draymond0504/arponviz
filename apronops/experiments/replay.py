@@ -91,6 +91,17 @@ def load_replay(data: bytes):
                 _strings(closure, ('from_node', 'to_node'))
                 _require(closure['from_node'] in ids and closure['to_node'] in ids)
                 _require(closure['reopened_at'] is None or isinstance(closure['reopened_at'], str))
+            for depot in _list(frame.get('depots', [])):
+                _strings(depot, ('id',))
+                _require(depot['id'] in ids)
+                for key in ('capacity','occupied','reserved','queue_length'):
+                    _require(type(depot[key]) is int and depot[key] >= 0)
+                _require(depot['occupied']+depot['reserved'] <= depot['capacity'])
+                if depot['predicted_wait_s'] is not None:
+                    _number(depot['predicted_wait_s'])
+            if frame.get('recovery'):
+                for key in ('resolved','relocations','unresolved'):
+                    _require(type(frame['recovery'][key]) is int and frame['recovery'][key] >= 0)
         _strings(raw['manifest'], ('policy', 'scenario_id', 'status'))
         _require(type(raw['manifest']['seed']) is int)
         _require(raw['manifest']['status'] in ('completed', 'interrupted', 'failed'))
