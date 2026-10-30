@@ -1,0 +1,77 @@
+schema_version: 1
+id: acceptance_shift
+start_time: '2026-01-01T00:00:00Z'
+description: '完整验收班次：单泊位故障排队/挪车、取货前通信故障、航班依赖、飞机穿越、封路及定位恢复。'
+horizon_s: 4800
+step_s: 0.5
+sample_s: 5
+depots:
+  DEPOT_AMR: {capacity: 1, pickup_s: 15, recovery_after_s: 30}
+tasks:
+  - id: ACCEPT_NORTH
+    type: inspection
+    origin: DEPOT_AMR
+    destination: CHECK_N
+    release_s: 0
+    deadline_s: 700
+    priority: 5
+    service_duration_s: 60
+  - id: ACCEPT_BAG
+    type: baggage_tow
+    origin: DEPOT_BAG_W
+    destination: SP_01
+    release_s: 500
+    deadline_s: 1400
+    priority: 4
+    service_duration_s: 120
+  - id: ACCEPT_EAST
+    type: inspection
+    origin: DEPOT_AMR
+    destination: SP_20
+    release_s: 900
+    deadline_s: 1700
+    priority: 3
+    service_duration_s: 60
+flights:
+  - id: ACCEPT_FLIGHT
+    stand_id: SP_07
+    announce_s: 1050
+    arrival_s: 1100
+    turnaround_s: 2400
+crossings:
+  - id: ACCEPT_AIR_WEST
+    crossing_id: X_04
+    aircraft_id: SYN_ACCEPT_01
+    announce_s: 1000
+    predicted_start_s: 1150
+    duration_s: 180
+    request_shift_s: 20
+  - id: ACCEPT_AIR_EAST
+    crossing_id: X_11
+    aircraft_id: SYN_ACCEPT_02
+    announce_s: 0
+    predicted_start_s: 400
+    duration_s: 90
+    request_shift_s: 15
+faults:
+  - id: ACCEPT_DEPOT_FAULT
+    start_s: 0
+    end_s: 300
+    vehicle_id: AMR_INSPECT_01
+    anomaly_type: communication_lost
+  - id: ACCEPT_PICKUP_FAULT
+    start_s: 505
+    end_s: 550
+    vehicle_id: TRACTOR_01
+    anomaly_type: communication_lost
+  - id: ACCEPT_POSITION_FAULT
+    start_s: 1200
+    end_s: 1260
+    vehicle_id: CATERING_01
+    anomaly_type: position_quality_degraded
+closures:
+  - id: ACCEPT_ACCESS_CLOSED
+    start_s: 700
+    end_s: 800
+    from_node: R_004
+    to_node: SP_01
