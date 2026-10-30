@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from html import escape
 from pathlib import Path
 import sys
 from datetime import datetime, timedelta, timezone
@@ -11,11 +12,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 # Streamlit may execute the file outside the repository working directory.
 if str(Path(__file__).resolve().parents[2]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from apronops.experiments.replay import frame_tracks, load_replay
+from apronops.dashboard.replay_player import build_replay_html
 
 API_BASE = os.environ.get("APRONOPS_API_BASE", "http://localhost:8000")
 
@@ -53,10 +56,7 @@ ANOMALOUS_STATES = {"DEGRADED", "PAUSED", "SAFE_STOP", "REMOTE_ASSIST"}
 def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_aircraft=False, route=None):
     """机坪拓扑（作业点+连接边）叠加车辆轨迹与当前位置。
 
-    车辆身份靠文字标签区分，不靠颜色——同一坐标系里任意两辆车的轨迹都可能
-    相邻/交叉，调色板在这种"全两两相邻"场景下只有前 3 槎位能过色觉校验，
-    因此默认全部车辆用统一灰色尾迹，仅用户主动勾选（最多 3 辆）时才换成
-    分类色高亮。
+    保留真实坐标，默认悬停查看车名；高亮车辆通过引线标签辨认。
     """
     fig = go.Figure()
 
@@ -166,10 +166,12 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_air
             ))
 
         is_anomalous = v["state"] in ANOMALOUS_STATES
-        label = vid + ("  ⚠" if is_anomalous else "")
+        label = escape(vid) + ("  ⚠" if is_anomalous else "")
+        nearby = [escape(other['id']) for other in vehicles if other['id'] != vid
+                  and abs(other['x']-v['x']) < 25 and abs(other['y']-v['y']) < 25]
         fig.add_trace(go.Scatter(
             x=[v["x"]], y=[v["y"]],
-            mode="markers+text",
+            mode="markers",
             marker=dict(
                 symbol="triangle-up" if is_anomalous else "circle",
                 size=16 if is_anomalous else 12,
@@ -180,13 +182,20 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_air
             textposition="bottom center",
             textfont=dict(color=INK_PRIMARY),
             hovertemplate=(
-                f"车辆 {vid}<br>状态: {v['state']}<br>电量: {v['battery']:.0f}%"
+                f"车辆 {escape(vid)}<br>状态: {escape(v['state'])}<br>电量: {v['battery']:.0f}%"
                 f"<br>实时速度: {v.get('current_speed_mps', 0.0):.1f} m/s"
-                f"<br>当前任务: {v.get('current_task_id') or '无'}<extra></extra>"
+                f"<br>当前任务: {escape(v.get('current_task_id') or '无')}"
+                + (f"<br>附近车辆: {', '.join(nearby)}" if nearby else '') + "<extra></extra>"
             ),
             showlegend=False,
             name=vid,
         ))
+        if is_highlighted:
+            fig.add_annotation(x=v['x'], y=v['y'], text=label, showarrow=True,
+                               ax=95, ay=-65+highlight_ids.index(vid)*45,
+                               arrowcolor=color, arrowwidth=1, arrowhead=0,
+                               bgcolor='rgba(255,255,255,0.95)', borderpad=4,
+                               font=dict(color=color, size=11))
 
     fig.update_layout(
         height=700,
@@ -249,6 +258,7 @@ def live_overview(layout_data, highlight_ids, show_aircraft, route_endpoints):
             st.warning(f"路线更新失败：{error_text(error)}")
     st.plotly_chart(build_topology_figure(current_layout, vehicles, state["tracks"], highlight_ids,
                                         show_aircraft, route), use_container_width=True, key="live_map")
+    st.caption('车辆名称悬停查看；高亮车辆显示引线标签。聚集车辆保留真实位置，可放大查看，或在车辆表核对等待原因。')
     st.subheader("车辆状态")
     if vehicles:
         df = pd.DataFrame(vehicles).reindex(columns=["id", "type", "state", "task_phase", "current_speed_mps", "battery", "current_task_id", "wait_reason", "recovery_action"])
@@ -522,7 +532,7 @@ elif page == "异常处置":
 
 elif page == "实验回放":
     st.title("实验回放")
-    st.caption("读取实验日志，不推进当前运行现场。可拖动时间轴核对车辆、任务、交叉管制和封路情况。")
+    st.caption("完整动画支持播放、暂停、倍速与拖动进度；读取实验日志，不推进当前运行现场。")
     results_root = Path(os.environ.get("APRONOPS_RESULTS_DIR", str(Path(__file__).resolve().parents[2] / "results/experiments")))
     local_files = sorted(results_root.glob("*/*/replay.json")) + sorted(results_root.glob("*/replay.json"))
     local_files = [p for p in local_files if p.resolve().is_relative_to(results_root.resolve())]
@@ -538,6 +548,12 @@ elif page == "实验回放":
             st.write(f"场景 {manifest['scenario_id']} · 策略 {manifest['policy']} · 种子 {manifest['seed']}")
             if manifest["status"] != "completed":
                 st.warning(f"此次实验状态为 {manifest['status']}，以下仅展示已保存的部分结果。")
+            player_html = build_replay_html(data)
+            components.html(player_html, height=850, scrolling=True)
+            st.download_button('下载完整动画（HTML，离线打开）', player_html,
+                               file_name='apronops-replay.html', mime='text/html')
+            st.subheader('逐帧数据核对')
+            st.caption('下方滑块独立于动画进度，用于查看精确采样帧和详细表格。')
             index = st.slider("回放帧", 0, len(frames)-1, 0) if len(frames)>1 else 0
             frame = frames[index]
             st.caption(f"仿真经过 {frame['elapsed_s']:.1f} 秒 · {frame['simulation_time']} UTC")

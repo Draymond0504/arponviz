@@ -45,6 +45,13 @@ def button(app, label):
 def test_overview_create_task_and_refresh_preserves_form(client):
     app = AppTest.from_file(APP, default_timeout=20).run()
     assert_clean(app)
+    # Map labels must not obscure colocated vehicles; coordinates stay truthful.
+    chart = json.loads(app.get('plotly_chart')[0].proto.spec)
+    for vehicle in client.get('/state').json()['vehicles']:
+        marker = next(t for t in chart['data'] if t.get('name') == vehicle['id']
+                      and 'markers' in t.get('mode', ''))
+        assert marker['mode'] == 'markers'
+        assert marker['x'] == [vehicle['x']] and marker['y'] == [vehicle['y']]
     task_id = next(t for t in app.text_input if t.label == '任务 ID')
     task_id.set_value('UI_TASK').run()
     button(app, '创建').click().run()
@@ -129,6 +136,9 @@ def test_experiment_replay_scrub_without_live_api(tmp_path, monkeypatch):
     calls.clear()
     app.selectbox[0].select(dest/'replay.json').run()
     assert_clean(app)
+    player = app.get('iframe')[0].proto.srcdoc
+    assert 'id="play"' in player and 'id="progress"' in player
+    assert 'id="replay-data"' in player
     assert len(app.get('plotly_chart')) == 1
     app.slider[0].set_value(2).run()
     assert_clean(app)
