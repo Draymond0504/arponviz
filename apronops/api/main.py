@@ -10,11 +10,11 @@ from datetime import timedelta
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
-from .. import metrics, simulator
-from ..models import Task, TaskType
+from .. import crossings, flights, metrics, scheduler, simulator
+from ..models import CrossingOccupancy, Flight, Task, TaskType
 from ..checkpoint import load_or_create_world
 from ..storage import init_db
-from .schemas import CloseRoadRequest, CreateTaskRequest, ResolveAlertRequest
+from .schemas import CloseRoadRequest, CreateTaskRequest, FlightRequest, OccupancyRequest, ResolveAlertRequest
 
 @asynccontextmanager
 async def lifespan(app):
@@ -170,6 +170,8 @@ def create_task(req: CreateTaskRequest):
             raise HTTPException(status_code=400, detail=f"unknown task type: {req.type}")
         if req.origin not in _world.layout.nodes or req.destination not in _world.layout.nodes:
             raise HTTPException(status_code=400, detail="unknown origin/destination node")
+        if any(_world.layout.nodes[n].type == 'crossing' for n in (req.origin, req.destination)):
+            raise HTTPException(status_code=400, detail="交叉冲突区不能作为作业停靠点")
         task = Task(
             id=req.id,
             type=task_type,
@@ -291,7 +293,11 @@ def get_state():
             "runtime_error": _runtime_error,
             "vehicles": [{**v.model_dump(), "wait_reason": _world.route_wait.get(v.id, "")}
                          for v in _world.vehicles.values()],
-            "tasks": [t.model_dump() for t in _world.tasks.values()],
+            "tasks": [{**t.model_dump(), "wait_reason": scheduler.task_wait_reason(t, _world.tasks, _world.now)}
+                      for t in _world.tasks.values()],
+            "flights": flights.flight_rows(_world),
+            "occupancies": [r.model_dump() for r in _world.occupancies.values()],
+            "crossings": crossings.crossing_rows(_world),
             "alerts": [a.model_dump() for a in _world.alerts.values()],
             "closures": list(_world.closures.values()),
             "tracks": {vid: [{"t": t.isoformat(), "x": x, "y": y} for t, x, y in points]
@@ -328,3 +334,42 @@ def health():
         if _runtime_error:
             raise HTTPException(status_code=503, detail=_runtime_error)
         return {"status": "ok", "revision": _world.revision, "simulation_time": _world.now.isoformat()}
+
+
+@app.get("/flights")
+def list_flights():
+    with _lock:
+        return flights.flight_rows(_world)
+
+
+@app.post("/flights")
+def save_flight(req: FlightRequest):
+    with _mutation():
+        try:
+            flight = flights.upsert_flight(_world, Flight(**req.model_dump(exclude={'expected_revision'})), req.expected_revision)
+            return flight.model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.get("/crossings/occupancies")
+def list_occupancies():
+    with _lock:
+        return [r.model_dump() for r in _world.occupancies.values()]
+
+
+@app.post("/crossings/occupancies")
+def add_occupancy(req: OccupancyRequest):
+    with _mutation():
+        try:
+            result = crossings.register_occupancy(_world, CrossingOccupancy(**req.model_dump()))
+            crossings.update_crossings(_world)
+            return result.model_dump()
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/scenarios/turnaround-demo")
+def load_turnaround_demo():
+    with _mutation():
+        return flights.load_demo(_world).model_dump()

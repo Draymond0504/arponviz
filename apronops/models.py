@@ -81,6 +81,34 @@ class Task(BaseModel):
     created_at: datetime
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    flight_id: Optional[str] = None
+    release_at: Optional[datetime] = None
+    depends_on: list[str] = Field(default_factory=list)
+    service_duration_s: Optional[float] = Field(default=None, gt=0)
+
+
+class Flight(BaseModel):
+    id: str
+    stand_id: str  # Vehicle service point, SP_01 ... SP_30.
+    arrival_at: datetime
+    departure_at: datetime
+    revision: int = 1
+    source: str = "synthetic"
+    template: str = "turnaround_v1"
+
+
+class CrossingOccupancy(BaseModel):
+    id: str
+    crossing_id: str
+    aircraft_id: str
+    predicted_start: datetime
+    predicted_end: datetime
+    requested_start: datetime
+    requested_end: datetime
+    actual_start: Optional[datetime] = None
+    actual_end: Optional[datetime] = None
+    status: str = "scheduled"  # scheduled / waiting_clearance / active / completed
+    source: str = "synthetic"
 
 
 class Event(BaseModel):

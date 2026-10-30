@@ -47,8 +47,20 @@ def assign_deadline_urgency(task: Task, vehicles: list[Vehicle], layout: Layout,
     return assign_nearest(task, vehicles, layout)
 
 
-def pick_task_order(tasks: list[Task], strategy: str = "priority") -> list[Task]:
+def task_wait_reason(task: Task, tasks: dict[str, Task], now) -> str:
+    if task.status.value not in ("PENDING", "REASSIGNED"):
+        return ""
+    if task.release_at is not None and (now is None or now < task.release_at):
+        return "等待任务释放时间"
+    if any(dep not in tasks or tasks[dep].status.value != "COMPLETED" for dep in task.depends_on):
+        return "等待前置任务完成"
+    return ""
+
+
+def pick_task_order(tasks: list[Task], strategy: str = "priority", now=None) -> list[Task]:
     pending = [t for t in tasks if t.status.value in ("PENDING", "REASSIGNED")]
+    by_id = {t.id: t for t in tasks}
+    pending = [t for t in pending if not task_wait_reason(t, by_id, now)]
     if strategy == "deadline":
         return sorted(pending, key=lambda t: (t.deadline or t.created_at))
     return sorted(pending, key=lambda t: (-t.priority, t.created_at))

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -119,6 +120,19 @@ def build_topology_figure(layout_data, vehicles, tracks, highlight_ids, show_air
             name=name, showlegend=True,
         ))
 
+    for crossing in layout_data.get("crossings", []):
+        radius = crossing["radius_m"]
+        color = "#bf3f3f" if crossing["aircraft"] else "#c18423"
+        fig.add_shape(type="circle", x0=crossing["x"]-radius, x1=crossing["x"]+radius,
+                      y0=crossing["y"]-radius, y1=crossing["y"]+radius,
+                      line=dict(color=color, width=2), fillcolor=color, opacity=0.25)
+    occupied = [c for c in layout_data.get("crossings", []) if c["aircraft"] or c["waiting_aircraft"]]
+    if occupied:
+        fig.add_trace(go.Scatter(x=[c["x"] for c in occupied], y=[c["y"] for c in occupied],
+            mode="markers+text", marker=dict(symbol="x", size=15, color="#bf3f3f"),
+            text=[c["status"]+" · "+c["id"] for c in occupied], textposition="top center",
+            name="飞机通行管制", hovertemplate="%{text}<extra></extra>"))
+
     if route:
         points = [node_by_id[nid] for nid in route["path"]]
         fig.add_trace(go.Scatter(
@@ -212,7 +226,7 @@ def live_overview(layout_data, highlight_ids, show_aircraft, route_endpoints):
     c3.metric("待分配 / 待转派", sum(t["status"] in ("PENDING", "REASSIGNED") for t in tasks))
     c4.metric("未解决告警", sum(not a["resolved_at"] for a in alerts))
     closed = {frozenset((c["from_node"], c["to_node"])) for c in state["closures"] if not c["reopened_at"]}
-    current_layout = {**layout_data, "edges": [
+    current_layout = {**layout_data, "crossings": state.get("crossings", []), "edges": [
         {**e, "closed": frozenset((e["from"], e["to"])) in closed} for e in layout_data["edges"]]}
     route = None
     if route_endpoints:
@@ -234,7 +248,7 @@ def live_overview(layout_data, highlight_ids, show_aircraft, route_endpoints):
         st.dataframe(df.rename(columns={"current_speed_mps": "速度(m/s)", "task_phase": "任务阶段", "wait_reason": "等待原因"}), use_container_width=True)
     st.subheader("任务列表")
     if tasks:
-        st.dataframe(pd.DataFrame(tasks)[["id", "type", "status", "priority", "origin", "destination", "assigned_vehicle_id"]], use_container_width=True)
+        st.dataframe(pd.DataFrame(tasks)[["id", "flight_id", "type", "status", "release_at", "deadline", "depends_on", "assigned_vehicle_id", "wait_reason"]], use_container_width=True)
 
 
 @st.fragment(run_every=2)
@@ -271,7 +285,42 @@ def live_alerts():
         st.warning(f"事件记录暂不可用：{error_text(error)}")
 
 
-page = st.sidebar.radio("导航", ["运行总览", "异常处置", "运营复盘"])
+def as_utc(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=timezone.utc)
+
+
+def local_time(value):
+    if not value:
+        return ""
+    return as_utc(value).astimezone(timezone(timedelta(hours=8))).strftime("%m-%d %H:%M:%S")
+
+
+@st.fragment(run_every=2)
+def live_flights():
+    state = fetch_state()
+    st.subheader("航班保障进度")
+    if state["flights"]:
+        df = pd.DataFrame(state["flights"])[["id", "stand_id", "arrival_at", "departure_at", "status", "completed_tasks", "total_tasks", "revision"]]
+        for col in ("arrival_at", "departure_at"):
+            df[col] = df[col].map(local_time)
+        st.dataframe(df.rename(columns={"arrival_at": "预计到位（北京时间）", "departure_at": "预计离位（北京时间）"}), use_container_width=True)
+        tasks = [t for t in state["tasks"] if t["flight_id"]]
+        if tasks:
+            st.dataframe(pd.DataFrame(tasks)[["flight_id", "type", "status", "release_at", "deadline", "depends_on", "wait_reason"]], use_container_width=True)
+    else:
+        st.info("尚未录入航班，可创建计划或载入合成演示。")
+    st.subheader("交叉区通行状态")
+    st.dataframe(pd.DataFrame(state["crossings"])[["id", "status", "aircraft", "waiting_aircraft", "vehicles", "radius_m"]], use_container_width=True)
+    if state["occupancies"]:
+        st.subheader("飞机占用窗口")
+        df = pd.DataFrame(state["occupancies"])[["id", "aircraft_id", "crossing_id", "status", "predicted_start", "requested_start", "requested_end", "actual_start", "actual_end"]]
+        for col in ("predicted_start", "requested_start", "requested_end", "actual_start", "actual_end"):
+            df[col] = df[col].map(local_time)
+        st.dataframe(df, use_container_width=True)
+        st.caption("窗口时间为北京时间。actual_start / actual_end 是仿真实际授予的占用时间；区内有车辆时会延迟授予。")
+
+
+page = st.sidebar.radio("导航", ["运行总览", "航班与穿越", "异常处置", "运营复盘"])
 
 if page == "运行总览":
     st.title("运行总览")
@@ -296,7 +345,7 @@ if page == "运行总览":
         destination = c2.selectbox("路线终点", node_options, index=node_options.index("SP_20"), format_func=node_labels.get)
         if enabled:
             route_endpoints = (origin, destination)
-        st.caption("路线避开封闭道路；交叉点仍采用停车 3 秒的仿真规则，尚未接入飞机占用信号。")
+        st.caption("路线避开封闭道路；飞机获准占用期间车辆在交叉区外等待。路线距离不包含等待时间。")
     live_overview(layout_data, highlight_ids, show_aircraft, route_endpoints)
     # Keep the form outside the timed fragment so typing is never interrupted.
     with st.form("create_task"):
@@ -316,6 +365,80 @@ if page == "运行总览":
                 st.success(f"任务 {task_id} 已保存，等待调度。创建下一条任务时请使用新的任务 ID。")
             except requests.RequestException as error:
                 st.error(f"创建失败：{error_text(error)}")
+
+elif page == "航班与穿越":
+    st.title("航班与穿越")
+    st.caption("合成运行模型：航班生成行李、配餐及保障后检查任务；检查在前两项完成后释放。飞机通行请求经冲突区清空后获准。")
+    try:
+        state = api_get("/state")
+        layout_data = get_layout_cached()
+    except requests.RequestException as error:
+        st.error(error_text(error))
+        st.stop()
+    if st.button("载入航班与穿越演示"):
+        try:
+            api_post("/scenarios/turnaround-demo")
+            st.success("已载入 1 个合成航班、3 项保障任务和 2 个穿越请求。重复点击不会重复创建。")
+            state = api_get("/state")
+        except requests.RequestException as error:
+            st.error(error_text(error))
+    stands = [n["id"] for n in layout_data["nodes"] if n["type"] == "service_point"]
+    with st.form("flight_create"):
+        st.subheader("创建航班计划")
+        c1, c2 = st.columns(2)
+        fid = c1.text_input("航班运行 ID", value="FLIGHT_001", help="同一航班不同日期请使用不同 ID。")
+        stand = c2.selectbox("机位服务点", stands, index=stands.index("SP_20"))
+        c1, c2 = st.columns(2)
+        arrival_minutes = c1.number_input("距当前仿真时间到位（分钟）", min_value=0, max_value=1440, value=1)
+        turnaround_minutes = c2.number_input("到位至离位（分钟）", min_value=1, max_value=1440, value=45)
+        if st.form_submit_button("创建航班并生成保障任务"):
+            try:
+                now = as_utc(api_get("/state")["simulation_time"])
+                arrival = now + timedelta(minutes=arrival_minutes)
+                api_post("/flights", json={"id": fid, "stand_id": stand, "arrival_at": arrival.isoformat(),
+                                         "departure_at": (arrival+timedelta(minutes=turnaround_minutes)).isoformat()})
+                st.success("航班及保障任务已保存。")
+            except requests.RequestException as error:
+                st.error(error_text(error))
+    if state["flights"]:
+        with st.form("flight_delay"):
+            st.subheader("更新航班计划")
+            by_id = {f["id"]: f for f in state["flights"]}
+            update_id = st.selectbox("待更新航班", list(by_id))
+            delay = st.number_input("到位及离位顺延（分钟）", min_value=1, max_value=1440, value=5)
+            st.caption("待执行任务同步更新时间窗；已开始作业保留位置和进度，已完成任务保留原截止时间。")
+            if st.form_submit_button("提交航班延误"):
+                f = by_id[update_id]
+                try:
+                    api_post("/flights", json={"id": f["id"], "stand_id": f["stand_id"],
+                        "arrival_at": (as_utc(f["arrival_at"])+timedelta(minutes=delay)).isoformat(),
+                        "departure_at": (as_utc(f["departure_at"])+timedelta(minutes=delay)).isoformat(),
+                        "expected_revision": f["revision"]})
+                    st.success("航班及关联任务时间窗已更新。")
+                except requests.RequestException as error:
+                    st.error(error_text(error))
+    with st.expander("录入飞机穿越请求"):
+        with st.form("occupancy_create"):
+            st.session_state.setdefault("occupancy_id", f"CROSS_{uuid.uuid4().hex[:8]}")
+            oid = st.text_input("占用请求 ID", key="occupancy_id")
+            aircraft = st.text_input("航空器标识", value="AIRCRAFT_001")
+            cid = st.selectbox("交叉点", [n["id"] for n in layout_data["nodes"] if n["type"] == "crossing"])
+            lead = st.number_input("预计开始距当前仿真时间（秒）", min_value=10, max_value=86400, value=30)
+            shift = st.number_input("申请通行相对预计时间推迟（秒）", min_value=0, max_value=3600, value=20)
+            duration = st.number_input("占用持续时间（秒）", min_value=1, max_value=3600, value=45)
+            st.caption("预计时间只用于对比；申请到达后禁止新车进入，区内车辆清空后飞机获得完整时长。")
+            if st.form_submit_button("保存穿越请求"):
+                try:
+                    now = as_utc(api_get("/state")["simulation_time"])
+                    predicted = now + timedelta(seconds=lead)
+                    requested = predicted + timedelta(seconds=shift)
+                    api_post("/crossings/occupancies", json={"id": oid, "aircraft_id": aircraft, "crossing_id": cid,
+                        "predicted_start": predicted.isoformat(), "predicted_end": (predicted+timedelta(seconds=duration)).isoformat(),
+                        "requested_start": requested.isoformat(), "requested_end": (requested+timedelta(seconds=duration)).isoformat()})
+                    st.success("穿越请求已保存；创建下一条时请使用新的请求 ID。")
+                except requests.RequestException as error:
+                    st.error(error_text(error))
+    live_flights()
 
 elif page == "异常处置":
     st.title("异常处置")

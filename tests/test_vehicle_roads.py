@@ -47,7 +47,7 @@ def test_aircraft_intersections_are_explicit_and_do_not_cut_stand_access():
     assert len(found) == 11
 
 
-def test_road_speed_cap_and_crossing_stop():
+def test_road_speed_cap_and_unoccupied_crossing_passage():
     layout = Layout()
     layout.nodes = {key: Node(key, key, 'crossing' if key == 'B' else 'road', x, 0.)
                     for key, x in [('A', 0.), ('B', 10.), ('C', 20.)]}
@@ -63,11 +63,8 @@ def test_road_speed_cap_and_crossing_stop():
         if vehicle.node_id == 'B':
             break
     assert vehicle.node_id == 'B'
-    wait = world.crossing_wait['V']
-    assert 2.9 <= wait <= 3.0
-    simulator._move_along_path(world, vehicle, wait / 2)
-    assert vehicle.x == 10. and vehicle.current_speed_mps == 0.
-    simulator._move_along_path(world, vehicle, wait / 2 + 1.)
+    assert world.crossing_wait.get('V', 0.) == 0.
+    simulator._move_along_path(world, vehicle, 1.)
     assert vehicle.x > 10.
 
 

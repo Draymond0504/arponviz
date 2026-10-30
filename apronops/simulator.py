@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from . import anomaly, kinematics, scheduler
+from . import anomaly, crossings, kinematics, scheduler
 from .layout import Layout, load_layout
 from .models import (
     Alert,
@@ -48,6 +48,9 @@ class World:
         self.route_wait: dict[str, str] = {}
         self.closures: dict[str, dict] = {}
         self.suspended_state: dict[str, VehicleState] = {}
+        self.flights = {}
+        self.occupancies = {}
+        self.crossing_tokens: dict[str, str] = {}
         self.revision = 0
         self.now = datetime.utcnow()
         self.home_node: dict[str, str] = {v.id: v.node_id for v in vehicles.values()}
@@ -124,8 +127,8 @@ def inject_anomaly(world: World, anomaly_type: str, vehicle_id: str) -> Event:
     return event
 
 
-def record_event(world: World, event_type: str, source: str, task_id=None, **payload) -> Event:
-    event = Event(id=str(uuid.uuid4()), timestamp=world.now, source=source,
+def record_event(world: World, event_type: str, source: str, task_id=None, event_time=None, **payload) -> Event:
+    event = Event(id=str(uuid.uuid4()), timestamp=event_time or world.now, source=source,
                   event_type=event_type, severity=EventSeverity.INFO,
                   related_task_id=task_id, payload=payload)
     world.pending_events.append(event)
@@ -301,8 +304,6 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
                 vehicle.planned_path = [vehicle.node_id] + layout.shortest_path(vehicle.next_node_id, vehicle.target_node_id)
             except ValueError:
                 vehicle.planned_path = [vehicle.node_id, vehicle.next_node_id]
-        _set_route_wait(world, vehicle, None)
-
         step = min(remaining_dt, kinematics.PHYSICS_SUBSTEP_S)
         remaining_dt -= step
 
@@ -317,9 +318,19 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
         turn_cap = kinematics.turn_slowdown_speed(layout, vehicle.planned_path, remaining_to_next_node)
         if turn_cap is not None:
             desired_speed = min(desired_speed, turn_cap)
-        if layout.nodes[vehicle.next_node_id].type == "crossing":
-            # Demo stop at the crossing vertex; no aircraft-clearance signal exists.
-            desired_speed = min(desired_speed, max(0.3, (2 * decel * remaining_to_next_node) ** 0.5))
+        crossing_id = vehicle.next_node_id if layout.nodes[vehicle.next_node_id].type == "crossing" else None
+        stop_distance = None
+        crossing_reason = ""
+        if crossing_id:
+            interval_end = world.now + timedelta(seconds=dt - remaining_dt)
+            crossing_reason = crossings.admission_reason(world, vehicle, crossing_id, interval_end)
+            if crossing_reason:
+                stop_distance = max(0.0, remaining_to_next_node - crossings.zone_radius(layout, crossing_id))
+                desired_speed = min(desired_speed, (2 * decel * stop_distance) ** 0.5)
+        if stop_distance is not None and stop_distance <= 1e-8:
+            _set_route_wait(world, vehicle, crossing_reason)
+            return False
+        _set_route_wait(world, vehicle, None)
 
         if desired_speed > vehicle.current_speed_mps:
             new_speed = min(desired_speed, vehicle.current_speed_mps + accel * step)
@@ -330,6 +341,12 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
         travel = 0.5 * (vehicle.current_speed_mps + new_speed) * step
         travel = min(travel, remaining_to_next_node)
         travel = max(travel, 0.0)
+        if stop_distance is not None and travel >= stop_distance:
+            travel = stop_distance
+            new_speed = 0.0  # Hard stop-line clamp: never overshoot on a large step.
+            _set_route_wait(world, vehicle, crossing_reason)
+        if crossing_id and remaining_to_next_node - travel < crossings.zone_radius(layout, crossing_id) - 1e-8:
+            world.crossing_tokens[crossing_id] = vehicle.id
 
         vehicle.current_speed_mps = new_speed
         vehicle.edge_progress_m += travel
@@ -346,9 +363,6 @@ def _move_along_path(world: "World", vehicle: Vehicle, dt: float) -> bool:
             vehicle.edge_progress_m = 0.0
             if len(vehicle.planned_path) > 1:
                 vehicle.planned_path = vehicle.planned_path[1:]
-            if layout.nodes[vehicle.node_id].type == "crossing":
-                world.crossing_wait[vehicle.id] = layout.metadata.get("crossing_wait_s", 3.0)
-                vehicle.current_speed_mps = 0.0
 
         if new_speed <= 1e-9 and travel <= 1e-9:
             # 被让行/跟车逼停在原地，本次 tick 不再继续推进子步，避免死循环消耗 remaining_dt
@@ -377,7 +391,7 @@ def _advance_vehicle(world: World, vehicle: Vehicle, dt: float, now: datetime) -
             vehicle.state = transition_vehicle(vehicle.state, VehicleState.OPERATING)
             task.status = transition_task(task.status, TaskStatus.IN_PROGRESS)
             task.started_at = task.started_at or now
-            record_event(world, "task_started", vehicle.id, task.id)
+            record_event(world, "task_started", vehicle.id, task.id, event_time=now)
             vehicle.task_phase = "to_destination"
             vehicle.target_node_id = task.destination
         return
@@ -386,7 +400,7 @@ def _advance_vehicle(world: World, vehicle: Vehicle, dt: float, now: datetime) -
         if _move_along_path(world, vehicle, dt):
             task = world.tasks[vehicle.current_task_id]
             vehicle.task_phase = "servicing"
-            vehicle.service_remaining_s = SERVICE_DURATION_S.get(task.type.value, 300)
+            vehicle.service_remaining_s = task.service_duration_s or SERVICE_DURATION_S.get(task.type.value, 300)
         return
 
     if vehicle.state == VehicleState.OPERATING and vehicle.task_phase == "servicing":
@@ -395,7 +409,7 @@ def _advance_vehicle(world: World, vehicle: Vehicle, dt: float, now: datetime) -
             task = world.tasks[vehicle.current_task_id]
             task.status = transition_task(task.status, TaskStatus.COMPLETED)
             task.completed_at = now
-            record_event(world, "task_completed", vehicle.id, task.id)
+            record_event(world, "task_completed", vehicle.id, task.id, event_time=now)
             vehicle.state = transition_vehicle(vehicle.state, VehicleState.RETURNING)
             vehicle.task_phase = "returning"
             vehicle.target_node_id = world.home_node[vehicle.id]
@@ -407,7 +421,7 @@ def _advance_vehicle(world: World, vehicle: Vehicle, dt: float, now: datetime) -
             vehicle.state = transition_vehicle(vehicle.state, VehicleState.IDLE)
             vehicle.task_phase = None
             vehicle.target_node_id = None
-            record_event(world, "vehicle_returned", vehicle.id)
+            record_event(world, "vehicle_returned", vehicle.id, event_time=now)
         return
 
 
@@ -435,7 +449,7 @@ def _persist(world: World) -> None:
         for v in world.vehicles.values():
             session.merge(VehicleORM(**v.model_dump(exclude={"type", "state", "planned_path"}), type=v.type.value, state=v.state.value))
         for t in world.tasks.values():
-            session.merge(TaskORM(**t.model_dump(exclude={"type", "status"}), type=t.type.value, status=t.status.value))
+            session.merge(TaskORM(**t.model_dump(exclude={"type", "status", "flight_id", "release_at", "depends_on", "service_duration_s"}), type=t.type.value, status=t.status.value))
         for e in world.pending_events:
             session.merge(EventORM(**e.model_dump(exclude={"severity"}), severity=e.severity.value))
         for a in world.alerts.values():
@@ -448,19 +462,31 @@ def _persist(world: World) -> None:
 
 
 def tick(world: World, dt: float = 5.0, random_anomaly_prob: float = 0.0) -> None:
-    world.now = world.now + timedelta(seconds=dt)
-    now = world.now
+    import math
 
-    for task in scheduler.pick_task_order(list(world.tasks.values())):
-        vehicle = scheduler.assign_nearest(task, list(world.vehicles.values()), world.layout)
-        if vehicle:
-            _start_assignment(world, vehicle, task, now)
-
+    if not math.isfinite(dt) or dt <= 0:
+        raise ValueError("dt must be finite and positive")
+    end = world.now + timedelta(seconds=dt)
+    while world.now < end:
+        crossings.update_crossings(world)
+        for task in scheduler.pick_task_order(list(world.tasks.values()), now=world.now):
+            vehicle = scheduler.assign_nearest(task, list(world.vehicles.values()), world.layout)
+            if vehicle:
+                _start_assignment(world, vehicle, task, world.now)
+        # Advance every vehicle on the same clock. Split also at externally
+        # requested occupancy and release times, so a window cannot be skipped.
+        step_end = min(end, world.now + timedelta(seconds=kinematics.PHYSICS_SUBSTEP_S))
+        boundaries = [r.requested_start for r in world.occupancies.values() if r.status == 'scheduled']
+        boundaries += [r.actual_end for r in world.occupancies.values() if r.status == 'active']
+        boundaries += [t.release_at for t in world.tasks.values() if t.release_at is not None]
+        step_end = min([step_end] + [t for t in boundaries if world.now < t < step_end])
+        step = (step_end - world.now).total_seconds()
+        for vehicle in world.vehicles.values():
+            _advance_vehicle(world, vehicle, step, step_end)
+        world.now = step_end
+    crossings.update_crossings(world)
     for vehicle in world.vehicles.values():
-        _advance_vehicle(world, vehicle, dt, now)
-        # 异常态车辆位置不变，会在原地重复打点，属预期行为（等价于停在原地）
-        world.tracks.setdefault(vehicle.id, deque(maxlen=TRACK_MAXLEN)).append((now, vehicle.x, vehicle.y))
-
-    _run_anomaly_checks(world, now, random_anomaly_prob)
+        world.tracks.setdefault(vehicle.id, deque(maxlen=TRACK_MAXLEN)).append((world.now, vehicle.x, vehicle.y))
+    _run_anomaly_checks(world, world.now, random_anomaly_prob)
     world.revision += 1
     _persist(world)

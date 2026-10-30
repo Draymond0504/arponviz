@@ -56,7 +56,10 @@ def sense_ahead_gap(world: "World", vehicle: Vehicle) -> float | None:
             continue
         # 对头：对方从本车的目标节点驶来，且终点正是本车所在节点
         if other.node_id == vehicle.next_node_id and other.next_node_id == vehicle.node_id:
-            if vehicle.id > other.id:
+            # The crossing owner must be able to clear the zone; applying the
+            # old lexical rule here can deadlock it against a car at the stop line.
+            owner = world.crossing_tokens.get(vehicle.node_id) or world.crossing_tokens.get(vehicle.next_node_id)
+            if owner == other.id or (owner != vehicle.id and vehicle.id > other.id):
                 gaps.append(0.0)  # id 字典序大的一方让行，避免死锁
             continue
         # 同边同向，且在本车前方

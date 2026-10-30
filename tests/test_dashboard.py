@@ -89,3 +89,22 @@ def test_no_route_is_visible_without_hiding_overview(client):
     chart = json.loads(app.get('plotly_chart')[0].proto.spec)
     assert any(t.get('name') == '封闭路段' for t in chart['data'])
     assert not any(t.get('name') == '预览路线' for t in chart['data'])
+
+
+def test_flight_page_demo_delay_and_crossing_request(client):
+    app = AppTest.from_file(APP, default_timeout=20).run()
+    app.sidebar.radio[0].set_value('航班与穿越').run()
+    assert_clean(app)
+    button(app, '载入航班与穿越演示').click().run()
+    assert_clean(app)
+    assert len(client.get('/flights').json()) == 1
+    button(app, '提交航班延误').click().run()
+    assert_clean(app)
+    assert client.get('/flights').json()[0]['revision'] == 2
+    button(app, '保存穿越请求').click().run()
+    assert_clean(app)
+    assert len(client.get('/crossings/occupancies').json()) == 3
+    button(app, '创建航班并生成保障任务').click().run()
+    assert_clean(app)
+    assert len(client.get('/flights').json()) == 2
+    assert len([t for t in client.get('/tasks').json() if t['flight_id']]) == 6

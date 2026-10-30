@@ -10,10 +10,10 @@ import json
 from collections import deque
 from datetime import datetime
 
-from .models import Alert, Task, Vehicle
+from .models import Alert, CrossingOccupancy, Flight, Task, Vehicle
 from .storage import AlertORM, EventORM, RuntimeSnapshotORM, TaskORM, VehicleORM, get_session
 
-SNAPSHOT_VERSION = 1
+SNAPSHOT_VERSION = 2
 
 
 def layout_fingerprint(layout) -> str:
@@ -34,6 +34,9 @@ def dump_world(world) -> dict:
         'vehicles': [v.model_dump(mode='json') for v in world.vehicles.values()],
         'tasks': [t.model_dump(mode='json') for t in world.tasks.values()],
         'alerts': [a.model_dump(mode='json') for a in world.alerts.values()],
+        'flights': [f.model_dump(mode='json') for f in world.flights.values()],
+        'occupancies': [r.model_dump(mode='json') for r in world.occupancies.values()],
+        'crossing_tokens': world.crossing_tokens,
         'home_node': world.home_node,
         'crossing_wait': world.crossing_wait,
         'route_wait': world.route_wait,
@@ -47,7 +50,7 @@ def restore_world(layout, payload):
     from .models import VehicleState
     from .simulator import TRACK_MAXLEN, World
 
-    if payload.get('version') != SNAPSHOT_VERSION:
+    if payload.get('version') not in (1, SNAPSHOT_VERSION):
         raise ValueError('Unsupported runtime snapshot version; use a separate APRONOPS_DB_PATH.')
     if payload.get('layout_fingerprint') != layout_fingerprint(layout):
         raise ValueError('Road layout differs from saved runtime; use a separate APRONOPS_DB_PATH.')
@@ -60,6 +63,11 @@ def restore_world(layout, payload):
     world.crossing_wait = dict(payload['crossing_wait'])
     world.route_wait = dict(payload['route_wait'])
     world.closures = dict(payload['closures'])
+    world.flights = {f['id']: Flight.model_validate(f) for f in payload.get('flights', [])}
+    world.occupancies = {r['id']: CrossingOccupancy.model_validate(r) for r in payload.get('occupancies', [])}
+    world.crossing_tokens = dict(payload.get('crossing_tokens', {}))
+    if payload['version'] == 1:
+        world.crossing_wait.clear()  # Retire the old fixed three-second crossing stop.
     world.suspended_state = {k: VehicleState(v) for k, v in payload['suspended_state'].items()}
     world.tracks = {k: deque([(datetime.fromisoformat(t), x, y) for t, x, y in points], maxlen=TRACK_MAXLEN)
                     for k, points in payload['tracks'].items()}
